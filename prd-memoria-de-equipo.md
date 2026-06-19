@@ -357,7 +357,13 @@ Organización
 
 - `CFG-1` (MUST) — El local se configura, **por organización**, con: **credencial (key) + URL de la API cloud.**
 - `CFG-2` (MUST) — Soporta **varias organizaciones a la vez** (varias empresas desde la misma máquina).
-- `CFG-3` (MUST) — Una org puede ser **local-only** (sin URL, sin sync): proyectos solo locales.
+- `CFG-3` (MUST) — **Existe exactamente UNA org sin URL: la pseudo-org `LOCAL`** (proyectos personales del dev,
+  sin cloud, sin sync). **No puede haber más de una** org sin URL. **Toda otra org DEBE** tener configurada la
+  **URL del cloud + la credencial** (token/secreto) que la identifica contra ese cloud (CFG-1). Sin URL no es
+  org de primera clase: es `LOCAL`/personal.
+  - **Org ⇒ existe cloud.** La frontera no es "el dev tiene acceso o no", es "**hay un cloud (URL) o no**". Una
+    org con URL pero **sin acceso actual** (key inválida/revocada) **sigue siendo org** — el cloud existe, el dev
+    está aislado (caso del gap #4, SYNC-10/SYNC-10b).
 - `CFG-4` (MUST — seguridad) — **Aislamiento estricto entre orgs:** memorias y búsquedas de una org
   NO se mezclan con otra. El org-wide search es *dentro de una* org, nunca entre empresas.
 - `CFG-5` (MUST) — El local guarda su propia key **por org**; sigue sin conocer keys de otros devs.
@@ -383,6 +389,28 @@ Organización
   Resuelve tanto "N repos sueltos" como "carpeta padre con sub-repos".
 - `RES-6` (SHOULD) — El **mapping** (org/proyecto/repo + topología) es **committeable** y viaja con el repo;
   **las credenciales jamás** van en ese archivo (siguen en el secret store local, `CFG-6`).
+- `RES-7` (MUST) — **Identidad de repo = git `origin`, obligatoria siempre.** Un repo se identifica por la URL
+  de su **remoto (`origin`)**. Un directorio con `git init` **sin remoto** **no es trabajable**: el sistema no
+  lo ancla (no inventa identidad). **Aplica por igual a repos de org y a personales/LOCAL** — un proyecto
+  personal es un repo GitHub del propio dev (o un clon de otro dev) y, por tanto, **también tiene `origin`**.
+  La distinción org vs LOCAL **no** es "tiene origin o no" (todos lo tienen), sino **de dónde sale la asignación
+  de proyecto** (mapping de org vs config local, ver RES-8). Ventaja: el `origin` es identidad **única y estable**
+  en toda la org, válida como **clave del mapping org-level** de proyectos.
+- `RES-8` (MUST) — **Asignación de proyecto y precedencia.** El proyecto de un repo (identificado por su `origin`,
+  RES-7) sale de dos fuentes posibles:
+  - **Mapping org-level:** el admin declara en el cloud "`origin` X → proyecto Y". **Baja por sync** (mismo
+    fan-out que las memorias org, SYNC-5); el local resuelve repo→proyecto **solo**, sin config por dev.
+  - **Config local declarativa** (RES-1): el dev lo declara en `.memoria/config.*`.
+  - **Precedencia — gana el mapping de la org.** Para repos de una org, el mapping org-level **gana sobre la
+    config local**. Razón: "N repos = 1 proyecto" vale por la **consistencia del equipo**; si cada dev reasignara
+    el proyecto localmente, la topología de la org se **fractura**.
+  - **La config local manda solo donde NO hay mapping org:** pseudo-org `LOCAL`/personal, o un repo de org que el
+    admin **todavía no mapeó**.
+  - **El mapping org solo existe donde hay cloud** (org con URL, CFG-3). En `LOCAL` no hay mapping → siempre
+    config local.
+  - **No contradice RES-2:** RES-2 le gana a la **heurística de nombre de carpeta**; el mapping org es **dato
+    autoritativo**, no heurística. Orden: **mapping org > config local > sugerencia por nombre** (esta última nunca
+    autoritativa, solo bootstrap RES-3).
 
 ---
 
@@ -614,6 +642,76 @@ LOCAL (cualquier dev, captura IA sin fricción)
   Cada org instala y opera su propio cloud. El local puede conectarse a múltiples orgs (CFG-2).
 
 ---
+
+## 16. Visor web de memorias
+
+> UI local que consume la **API local** (SQLite). Es el componente con más responsabilidades colgadas a lo
+> largo del PRD (CAP-3/CAP-4/CAP-14, ID-7/ID-10/ID-11/ID-12, SRCH-3, SYNC-12, NFR-7/NFR-9); esta sección las
+> consolida y define qué muestra y qué deja hacer.
+
+### Alcance y navegación
+
+- `VIS-1` (MUST) — **Lee exclusivamente del local.** El local replica **toda la org** (SYNC-5) y la búsqueda
+  es **siempre local** (sección 13, "nunca va al cloud"). El visor **no** hace consultas vivas al cloud. Anda
+  100% offline (NFR-7).
+- `VIS-2` (MUST) — **Entrada por organización.** Lo primero es un selector **"¿qué organización querés ver?"**:
+  cada org configurada (A, B…) + una pseudo-org **LOCAL** (proyectos personales sin org, CFG-3). Acá se
+  materializa el **aislamiento estricto** (CFG-4): se ve **una org por vez**; memorias y búsquedas no cruzan
+  el límite de org.
+- `VIS-3` (MUST) — **Drill-down por anclaje.** Dentro de la org elegida, la navegación baja por los tres ejes:
+  **organización → proyecto → repo**. La vista de proyecto muestra la topología (VIS-4).
+- `VIS-4` (MUST) — **Vista de proyecto = topología, no lista plana.** Dentro de un proyecto, el visor muestra
+  los repos con su **rol** (DM-4) y las **aristas dirigidas** entre ellos (DM-5), no una bolsa plana de repos.
+  - **Es decisión visual, no de datos:** la topología es **dato de primera clase ya almacenado** (DM-5,
+    consultable). Mostrarla **no cuesta campos nuevos**; una lista plana solo **desperdiciaría** dato existente.
+  - **Fidelidad de render abierta a diseño (MVP-friendly):** el MVP puede ser una **vista estructurada** (cada
+    repo con su rol + sus aristas listadas); el **grafo visual completo** es una mejora posterior. La mejora es
+    puro front sobre el mismo modelo — **no hay migración de datos** porque la topología ya existe (DM-5).
+
+> **Principio de evolución del visor:** mientras el **dato ya esté en el modelo**, el MVP puede mostrar una vista
+> simple y las mejoras de UI no generan cruces ni migraciones — son puro front sobre la misma base. Aplica a la
+> topología (VIS-4), a las relaciones (VIS-5) y a todo lo visual del visor.
+
+### Vista de detalle y relaciones
+
+- `VIS-5` (MUST) — **Detalle de memoria con relaciones inline.** Al abrir una memoria, el visor muestra sus
+  relaciones (`replaces`/`extends`/`diverges`/`caused`) como **lista inline**: tipo + dirección + título, con
+  click para **saltar** a la relacionada (traversal de a un salto). Los datos ya los provee la API (SRCH-5:
+  `search` shallow `{id, title, type, direction}`, `get memory` con contenido completo) — no requiere nada nuevo.
+  - **Historial:** un **"ver historial"** despliega, desde la memoria vigente, la cadena de versiones `replaced`
+    (DM-13, recuperable bajo demanda).
+  - **Mejora futura (sin tocar modelo):** una **vista de grafo** de memorias (cadenas de `replaces`, árboles de
+    `extends`) es una mejora posterior — mismo dato, puro front (ver principio de evolución).
+
+### Búsqueda en el visor
+
+- `VIS-6` (MUST) — **Búsqueda auto-scope con escape para ensanchar.** La búsqueda del visor aplica por defecto el
+  **contexto resuelto** (org/proyecto/repo) como filtro inicial. El visor es el "llamador" al que SRCH-2 le deja
+  decidir los filtros, y el contexto es **determinístico** (repo por `origin` RES-7, proyecto por mapping RES-8,
+  org por cloud CFG-3): **no adivina por nombre de carpeta** — el scope refleja una **posición conocida**, no una
+  corazonada.
+  - **Escape innegociable:** un click ensancha a "todo el proyecto" o "toda la org" (caso de uso (a),
+    estandarizar org-wide).
+  - **Filtros adicionales:** por `tag` (SRCH-4) y por `lifecycle` (SRCH-6, `replaced`/`inactive`/`conflict` bajo
+    demanda). Motor BM25 local (SRCH-1), siempre offline.
+
+### Acciones de curación
+
+- `VIS-7` (MUST) — **Acciones sobre memorias propias** (gate por `author_id`, ID-10/ID-12): **editar contenido**
+  (in-place, CAP-12), **editar el `tag`**, y **agregar/corregir/quitar relaciones** (CAP-14). **Borrar NO** — es
+  exclusivo del admin vía cloud (DM-16). La edición del admin sobre memoria ajena es cloud-side (ID-10).
+- `VIS-8` (MUST) — **Re-anclaje (mover una memoria en el árbol org/proyecto/repo).**
+  - **Cruzar de org: IMPOSIBLE.** Inviable por el aislamiento estricto (CFG-4, tenant boundary): una memoria
+    **pertenece a su org**. Para "moverla" a otra org, se **recrea** a mano allá; no se mueve.
+  - **Dentro de la misma org, solo el autor** (`author_id`, ID-10/ID-12):
+    - `repo → repo` dentro del **mismo proyecto**.
+    - `proyecto A → proyecto B` (misma org).
+  - **Límite temporal: 30 días desde `created_at`** (DM-15). Pasado el plazo, el anclaje queda **fijo**.
+    Fundamento: una memoria fresca con anclaje errado se corrige; una vieja ya está **asentada en el grafo
+    compartido** (linkeada, buscada) y moverla disrumpe.
+  - **Coherencia con RES-8:** para memorias a nivel repo, el proyecto lo determina el `origin` del repo (mapping
+    org, RES-8); el re-anclaje entre proyectos aplica de lleno a **memorias de proyecto** (`repo = null`) o, en
+    repos, implica reconocer a qué repo/proyecto corresponde realmente.
 
 ## Decisiones abiertas / a definir en diseño
 - Mandatos duros de seguridad/compliance (campo `fuerza` en memoria org) — diferido, v1 todo overridable.
