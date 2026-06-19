@@ -1,12 +1,12 @@
 # PRD — Memoria de equipo (contexto de proyectos con IA)
 
-> **Estado:** en revisión activa. Última sesión: 2026-06-18.
+> **Estado:** 6 gaps de refinamiento cerrados — listo para diseño. Última sesión: 2026-06-19.
 > **Sesión 2026-06-16 mañana:** Búsqueda, Sync, No-funcionales.
 > **Sesión 2026-06-16 tarde:** Modelo de datos — entidad Memory completa, topic como string, tag como valor único,
 > lista preferente de tags (v1), relaciones entre memorias, lifecycle de memorias,
 > SLA de búsqueda unscoped cualificado.
 > **Sesión 2026-06-17:** Correcciones de consistencia — `supersede` → `replaces` (VAL-2, VAL-3, CAP-3);
-> conflicto de sync: lifecycle_state=conflict + relación `caused` automática (SYNC-9, DM-12);
+> conflicto de sync: lifecycle_state=conflict + relación `caused` automática (SYNC-9, DM-12) — *[revisado 2026-06-19: el `caused` se removió, ver abajo]*;
 > topics fuera del delta de sync, derivados localmente (SYNC-5);
 > 4ta relación `diverges` para desviaciones de norma org (DM-10, SEM-6).
 > **Sesión 2026-06-18:** Borrado de memorias — exclusivo del admin vía cloud (DM-16); borrado **lógico** en cloud
@@ -24,10 +24,24 @@
 > mismo-autor multi-device.
 > Creación de relaciones (gap #6 cerrado): autoría best-effort del agente en captura, **relación faltante > memoria
 > faltante** — nunca se bloquea el guardado (CAP-13); el juicio + recall del target vive en la skill (CAP-14, LOCAL-5);
-> backstop de `replaces` vía conflicto (DM-12), `diverges` sin backstop (juicio puro); UI local edita relaciones propias.
+> backstop de `replaces` vía posibles duplicados (VIS-10) *[re-apuntado 2026-06-19; antes vía conflicto DM-12]*,
+> `diverges` sin backstop (juicio puro); UI local edita relaciones propias.
 > Identidad/login local (gap #5 cerrado): first-run del visor pide **nombre + contraseña** (ID-11) — contraseña = gate
 > del visor, nombre = identidad local; el MCP no usa login. `author_id` local = sentinel reservado **`-1`** (no `0` ni
 > `null`); el cloud reescribe al `id_dev` real desde la key al subir (ID-12); "propia" = `-1` o mi `id_dev` remapeado.
+> **Sesión 2026-06-19:** Modelo de conflictos vs. identidad (avance gap #1 visor) — separación de **tres casos**
+> que estaban mezclados: (1) **conflicto de edición** = mismo `id`, misma memoria → reconciliar contenido, **sin
+> `caused`** (DM-12, SYNC-9, VIS-9); el `caused` automático se removió porque relacionaba una memoria consigo misma,
+> violando DM-10. (2) **Redundancia** = `id` distinto, mismo anclaje+topic+tag → supersesión vía `replaces`, ofrecida
+> como **posibles duplicados** en el visor (CAP-13 re-apuntado, VIS-10), no como conflicto. (3) **Colisión accidental
+> de `id`** = mismo `id`, memorias distintas → problema de identidad, el cloud re-asigna el UUID discriminando por
+> `CREATE` vs `UPDATE` (SYNC-14, nota en DM-15). Se mantuvo **single UUID v7** (no doble id local/cloud): la unicidad
+> se garantiza con validación server-side, sin reescribir aristas en cada subida.
+> **Estados pasivos del visor (VIS-11):** último sync (NFR-9), read-only vs editable (ID-10/12), draft editable con
+> promoción **unidireccional** `draft → active` (el agente abre uno nuevo si se promueve a mitad de sesión).
+> **Principio de uso del visor:** primariamente para visualizar; el agente es el canal de trabajo; curación mínima
+> en el visor. **Re-anclaje por admin (VIS-8):** puede re-anclar memorias ajenas **sin límite de fecha**, cloud-side;
+> el cruce de org sigue imposible (estructural). **→ Gap #1 cerrado: los 6 gaps del PRD quedan completos.**
 > **Resuelto:** Orden del ciclo sync — pull primero (SYNC-11).
 
 ---
@@ -117,10 +131,18 @@ Organización
   - **`diverges`** — B (proyecto/repo) se sale de la norma establecida por A (org) en ese contexto específico. A sigue `active` y vigente para el resto. El motivo va en el texto de B (SEM-6).
 - `DM-11` (MUST — principio) — Una relación existe **solo si agrega información que el anclaje no provee por sí solo.** No todas las memorias necesitan estar relacionadas.
   Se descartan: `conflicts_with` (si dos memorias se contradicen, una reemplaza a la otra), `related` (sin caso concreto que topic+tag no cubra → ruido).
-- `DM-12` (MUST) — Cuando el cloud detecta un conflicto de sync, **marca la memoria nueva con
-  `lifecycle_state = conflict`** y crea automáticamente una relación `caused` (nueva → vieja ganadora).
-  El `lifecycle_state` es la señal para distinguir esta arista de una `caused` creada por un dev.
-  Se resuelve desde la UI (CAP-3): el dev decide cuál reemplaza a cuál y crea la relación `replaces` correspondiente.
+- `DM-12` (MUST) — **Conflicto de sync = misma memoria (mismo `id`), dos versiones divergentes** (edición
+  multi-device del mismo autor, SYNC-9; o local-vs-pull, SYNC-12). El cloud **marca la versión perdedora con
+  `lifecycle_state = conflict`**. **No crea ninguna relación `caused`:** `caused` (DM-10) relaciona dos memorias
+  **distintas**, y acá ambas versiones son la **misma** memoria — una arista hacia sí misma no tiene sentido.
+  La resolución es **reconciliar contenido** (mergear o elegir versión), no crear un `replaces`. Se resuelve
+  desde la UI (CAP-3, VIS-9).
+  - **Distinguir de la redundancia:** dos memorias con **`id` distinto** pero mismo anclaje+topic+tag **no son
+    un conflicto**; son **supersesión** vía `replaces` (lo propone el agente en captura —gap #6, CAP-13— o lo
+    crea el dev curando). No llevan `lifecycle_state = conflict` ni `caused`. La UI las ofrece como **posibles
+    duplicados** (VIS-10), no como conflicto.
+  - **Distinguir de la colisión accidental de `id`:** mismo `id` pero memorias **distintas** (otro anclaje/topic)
+    es un problema de **identidad**, no de contenido: el cloud re-asigna el ID (SYNC-14). Nunca llega a `conflict`.
 
 ### Lifecycle de memorias
 
@@ -143,7 +165,7 @@ Organización
 
   | Campo | Descripción |
   |-------|-------------|
-  | `id` | UUID v7 (time-ordered). Generado localmente al crear la memoria. El cloud usa el mismo ID como canónico. Sin ID local/cloud separados. |
+  | `id` | UUID v7 (time-ordered). Generado localmente al crear la memoria. El cloud usa el mismo ID como canónico. Sin ID local/cloud separados. El cloud **valida unicidad al recibir**; una colisión accidental de UUID entre memorias distintas se resuelve re-asignando el ID, no mergeando contenido (SYNC-14). |
   | `title` | Título de la memoria |
   | `content` | Contenido |
   | `topic` | String libre — el "sobre qué". Opcional. |
@@ -481,9 +503,14 @@ Organización
   **igual, sin la arista**; jamás "no pude relacionarla, no la guardo". Coherente con DM-11 (una relación
   existe solo si agrega info) y con la filosofía no-destructiva.
   - **Backstop para `replaces`:** una memoria guardada sin su `replaces` no queda huérfana. Si nace otra con
-    **mismo anclaje + topic + tag**, el mecanismo de conflicto (DM-12) la marca `conflict` en el sync y la
-    sube a la UI para que el dev resuelva (CAP-3). El `replaces` que el agente no puso, el sistema lo caza
-    río abajo.
+    **mismo anclaje + topic + tag** (memorias con **`id` distinto**), el visor las **sugiere como posibles
+    duplicados** (VIS-10). **El código nunca crea el `replaces` ni afirma que son duplicados:** mismo
+    anclaje+topic+tag es coincidencia **estructural, no semántica** — esas dos memorias pueden ser `extends`
+    (complementarias) o no tener relación. La heurística solo **filtra candidatos baratos para revisar**; la
+    decisión de crear el `replaces` exige **juicio semántico sobre el contenido**, que vive en dos lugares y
+    **jamás en inferencia automática**: (a) el **agente en captura**, con contenido fresco + recall (CAP-14);
+    (b) el **dev en el visor**, mirando el contenido y pudiendo descartar (VIS-10). **No es un conflicto**
+    (DM-12 es solo para mismo `id`): no se marca `lifecycle_state = conflict` ni se crea `caused`.
   - **`diverges` no tiene backstop automático:** reconocer que la org tiene una norma y que el contexto
     actual se desvía es **juicio puro del agente** (vive en la skill, LOCAL-5). Si no lo reconoce, se guarda
     la memoria sin la arista y el dev la agrega a mano (CAP-14).
@@ -569,8 +596,9 @@ LOCAL (cualquier dev, captura IA sin fricción)
 - `SYNC-9` (MUST) — **Conflictos de edición:** como solo el autor edita su memoria (ID-10), el caso "dos devs
   editan la misma memoria" **no puede ocurrir entre devs distintos**; queda acotado al **mismo autor en dos
   máquinas** (multi-device). Si llegan dos ediciones del mismo `id`, la API compara timestamps: la primera gana
-  `active`, la segunda queda `lifecycle_state = conflict` + relación `caused` automática hacia la ganadora (DM-12).
-  El dev lo resuelve desde la UI (CAP-3). La edición del **admin** sobre memoria ajena es cloud-side y baja por
+  `active`, la segunda queda `lifecycle_state = conflict` (DM-12). **Sin relación `caused`:** son dos versiones de
+  la **misma** memoria, así que la resolución es **reconciliar contenido** (mergear/elegir versión), no crear una
+  arista. El dev lo resuelve desde la UI (CAP-3, VIS-9). La edición del **admin** sobre memoria ajena es cloud-side y baja por
   pull → su conflicto con una edición local no pusheada del autor lo maneja SYNC-12.
 - `SYNC-10` (MUST) — **Key revocada (offboarding) — flujo de purga:**
   1. El local sincroniza y el cloud responde `"key inactiva"` (ID-6).
@@ -598,6 +626,20 @@ LOCAL (cualquier dev, captura IA sin fricción)
 - `SYNC-11` (MUST) — **Orden del ciclo:** pull primero, luego push. Se baja el estado del cloud antes de subir cambios locales para minimizar conflictos.
 - `SYNC-12` (MUST) — **Conflicto detectado en pull:** si el pull trae una versión actualizada de una memoria que el dev también editó localmente (aún no pusheada), el local aplica la versión cloud y marca la edición local como `conflict`. El dev resuelve desde la UI antes de que esa memoria se pushee.
 - `SYNC-13` (MUST) — **Borrado admin (fan-out):** cuando el admin borra una memoria (DM-16), el cloud la marca `deleted` y le asigna un `upload_at` nuevo. Baja por el cursor de pull como cualquier delta; cada local que la tenía **purga físicamente** el contenido y las relaciones que la apuntaban (DM-16). El **first-sync** (SYNC-8) no envía memorias `deleted` — en un local nuevo no hay nada que purgar. Como el ciclo es **pull primero** (SYNC-11), el borrado le gana a una edición local no pusheada: el local purga y descarta su edición.
+- `SYNC-14` (MUST) — **Colisión accidental de `id` (no es conflicto de contenido):** con UUID v7 generado en local,
+  la probabilidad de que dos memorias **distintas** saquen el mismo `id` es ínfima (requiere mismo milisegundo +
+  mismos ~74 bits aleatorios), pero el cloud **no la asume imposible**. El discriminador es el **tipo de operación**
+  con que llega el upload:
+  - **`CREATE` con `id` ya existente** → es una **colisión accidental** (una memoria nueva nunca debería reclamar
+    un `id` ya tomado). El cloud **conserva el `id` de la memoria que ya estaba** (llegó primero, es la canónica),
+    **re-asigna un UUID nuevo a la entrante** y le responde al local: *"ese `id` ya existe, usá este otro"*. El local
+    **actualiza la memoria y reescribe sus aristas locales** apuntando al `id` nuevo. Es un **fallback de emergencia**
+    (probabilidad ≈ cero, acotado a una sola memoria), no la mecánica normal de sync.
+  - **`UPDATE` con `id` ya existente** → es la **misma** memoria, dos versiones → **conflicto de edición** (SYNC-9),
+    se reconcilia contenido. No se re-asigna nada.
+  - **Por qué no doble `id` (local + cloud):** la garantía de unicidad se obtiene con esta validación server-side
+    sobre el ID único; un segundo ID obligaría a una tabla de traducción local↔cloud y a **reescribir aristas en
+    cada subida** (no solo en la colisión). El UUID v7 mantiene identidad estable desde el nacimiento (DM-15).
 
 ---
 
@@ -648,6 +690,11 @@ LOCAL (cualquier dev, captura IA sin fricción)
 > UI local que consume la **API local** (SQLite). Es el componente con más responsabilidades colgadas a lo
 > largo del PRD (CAP-3/CAP-4/CAP-14, ID-7/ID-10/ID-11/ID-12, SRCH-3, SYNC-12, NFR-7/NFR-9); esta sección las
 > consolida y define qué muestra y qué deja hacer.
+>
+> **Principio de uso:** el visor es primariamente para **visualizar**. El canal principal de trabajo sobre
+> memorias es el **agente** (captura y edición conversacional). En el visor el dev hace **curación mínima sobre
+> sus propias memorias** (VIS-7) — no es la herramienta de trabajo principal. Las acciones editables del visor
+> son la excepción, no el flujo habitual.
 
 ### Alcance y navegación
 
@@ -712,6 +759,51 @@ LOCAL (cualquier dev, captura IA sin fricción)
   - **Coherencia con RES-8:** para memorias a nivel repo, el proyecto lo determina el `origin` del repo (mapping
     org, RES-8); el re-anclaje entre proyectos aplica de lleno a **memorias de proyecto** (`repo = null`) o, en
     repos, implica reconocer a qué repo/proyecto corresponde realmente.
+  - **Re-anclaje por el admin (excepción):** el admin **puede re-anclar memorias ajenas** (de cualquier autor)
+    y **sin el límite de 30 días** — coherente con ID-10 (el admin cura cualquier memoria). El límite temporal
+    es un freno para el **autor**; el admin tiene autoridad sobre el grafo y reorganiza cuando haga falta. Ocurre
+    **cloud-side** (mismo path privilegiado que DM-16/ID-10) y baja por fan-out; queda trazado en `editor_id`/
+    `edited_at` (ID-10). **El cruce de org sigue imposible también para el admin:** es un límite **estructural**
+    (CFG-4, NFR-11 — cada org es un cloud aparte), no un permiso que el rol pueda saltar.
+
+### Resolución de conflictos y duplicados
+
+- `VIS-9` (MUST) — **Resolución de conflicto de edición (mismo `id`).** Cuando una memoria propia quedó en
+  `lifecycle_state = conflict` (SYNC-9 multi-device, o SYNC-12 local-vs-pull), el visor la muestra como
+  pendiente de resolución y permite **reconciliar contenido**: ver ambas versiones (la `active` ganadora y la
+  marcada `conflict`), y **mergear o elegir** cuál queda como vigente. **No** ofrece crear `replaces` ni `caused`:
+  son dos versiones de la **misma** memoria, no dos memorias distintas (DM-12). Al resolver, la versión elegida
+  queda `active` y la otra se descarta.
+- `VIS-10` (MUST) — **Vista de posibles duplicados (ids distintos).** Aparte del flujo de conflicto, el visor
+  agrupa memorias con **mismo anclaje + topic + tag** pero **`id` distinto** (backstop de CAP-13) como
+  **candidatas de baja confianza** a revisar. **La agrupación es señal estructural, no una afirmación de
+  duplicado:** el visor **no infiere la relación ni crea nada automáticamente**. El **dev revisa el contenido**
+  y decide: crear un `replaces` (supersesión), un `extends` (son complementarias), o **descartar** la sugerencia
+  (no tienen relación). Recién con esa confirmación el visor crea la arista (DM-10). Es **curación opcional**, no
+  un estado bloqueante: no hay `lifecycle_state = conflict` involucrado. Solo sobre memorias propias (ID-10/ID-12).
+
+### Estados pasivos
+
+- `VIS-11` (MUST) — **Estados pasivos del visor** = indicadores que el visor **muestra** sin que el dev actúe.
+  Tres:
+  - **(a) Último sync exitoso (NFR-9):** la fecha/hora del último sync OK, como indicador pasivo **sin alertas
+    ni interrupciones**. En una org **LOCAL-only** (CFG-3, sin cloud) no hay sincronización → el indicador muestra
+    "local, sin cloud" en lugar de una fecha.
+  - **(b) Read-only vs. editable (ID-10/ID-12):** badge visible que distingue las memorias **editables**
+    (`author_id == -1` **o** `== mi id_dev` en esa org) de las **solo-lectura** (de otros devs bajadas por
+    fan-out, y memorias org que nacen cloud-side del admin). La señal es visible **antes** de intentar editar,
+    para que las acciones de VIS-7 no sorprendan al dev.
+  - **(c) Draft de sesión activa (CAP-4):** el visor muestra el draft con badge **"borrador"**. El draft **es
+    editable a mano** por el dev en el visor: puede **editarlo y mantenerlo `draft`**, o **editarlo y promoverlo
+    a memoria consolidada (`active`)** cuando quiera. La promoción también la hace el **agente** al cerrar la
+    sesión (CAP-2); ambos caminos —dev manual y agente automático— confluyen en la misma transición.
+    - **Transición unidireccional `draft → active`.** Una memoria consolidada **nunca** vuelve a `draft`.
+      Fundamento: `active` sincroniza (SYNC-6) y puede estar ya **linkeada/buscada por otros**; degradarla a
+      `draft` (local, no-sync) la **sacaría del cloud** y rompería las relaciones que la apuntan.
+    - **Promoción a mitad de sesión:** si el dev promueve el draft mientras la sesión del agente sigue viva, el
+      agente **abre un draft nuevo** y continúa acumulando ahí; el draft promovido queda cerrado como memoria.
+      No es el flujo habitual —normalmente el draft lo finaliza el agente al cierre (CAP-2)— pero la promoción
+      manual **no interrumpe** la sesión.
 
 ## Decisiones abiertas / a definir en diseño
 - Mandatos duros de seguridad/compliance (campo `fuerza` en memoria org) — diferido, v1 todo overridable.
