@@ -1,6 +1,6 @@
 # PRD — Memoria de equipo (contexto de proyectos con IA)
 
-> **Estado:** en revisión activa. Última sesión: 2026-06-17.
+> **Estado:** en revisión activa. Última sesión: 2026-06-18.
 > **Sesión 2026-06-16 mañana:** Búsqueda, Sync, No-funcionales.
 > **Sesión 2026-06-16 tarde:** Modelo de datos — entidad Memory completa, topic como string, tag como valor único,
 > lista preferente de tags (v1), relaciones entre memorias, lifecycle de memorias,
@@ -9,7 +9,26 @@
 > conflicto de sync: lifecycle_state=conflict + relación `caused` automática (SYNC-9, DM-12);
 > topics fuera del delta de sync, derivados localmente (SYNC-5);
 > 4ta relación `diverges` para desviaciones de norma org (DM-10, SEM-6).
-> **Pendiente de pactar:** Orden del ciclo sync (pull vs push primero) — diferible a diseño.
+> **Sesión 2026-06-18:** Borrado de memorias — exclusivo del admin vía cloud (DM-16); borrado **lógico** en cloud
+> (retención + auditoría) y **purga física** en el local (SYNC-13); el dev pierde "borrar" (CAP-3);
+> `deleted` es estado **cloud-only** (DM-13, DM-14, SRCH-6); al purgar una memoria, el local elimina también
+> las relaciones que la apuntaban.
+> Identidad/sync (gap #4 cerrado): MCP no autentica → escritura local siempre libre; **autorización server-side**
+> contra la key (NFR-5); key inválida ≠ revocada (SYNC-10b vs SYNC-10); flujo de purga por offboarding con guardia
+> de idempotencia `purge_executed_at` + confirmación al cloud (SYNC-10). Nivel 2: la **escritura org-level es
+> cloud-only** (UI admin + login cloud, SYNC-3b); los locales nunca tienen key org-write; las memorias org igual
+> bajan por fan-out y viven en local offline.
+> Editar vs. reemplazar (gap #3 cerrado): editar = in-place para fidelidad/completar; `replaces` = supersesión;
+> criterio "¿la vieja alguna vez fue verdad?" vive en la skill (CAP-12). Autorización (ID-10): el dev edita solo
+> lo suyo, el admin edita cualquiera cloud-side; se registra `editor_id`/`edited_at` (DM-15). SYNC-9 acotado a
+> mismo-autor multi-device.
+> Creación de relaciones (gap #6 cerrado): autoría best-effort del agente en captura, **relación faltante > memoria
+> faltante** — nunca se bloquea el guardado (CAP-13); el juicio + recall del target vive en la skill (CAP-14, LOCAL-5);
+> backstop de `replaces` vía conflicto (DM-12), `diverges` sin backstop (juicio puro); UI local edita relaciones propias.
+> Identidad/login local (gap #5 cerrado): first-run del visor pide **nombre + contraseña** (ID-11) — contraseña = gate
+> del visor, nombre = identidad local; el MCP no usa login. `author_id` local = sentinel reservado **`-1`** (no `0` ni
+> `null`); el cloud reescribe al `id_dev` real desde la key al subir (ID-12); "propia" = `-1` o mi `id_dev` remapeado.
+> **Resuelto:** Orden del ciclo sync — pull primero (SYNC-11).
 
 ---
 
@@ -114,8 +133,9 @@ Organización
   | `replaced` | Fue reemplazada por otra vía relación `replaces`. Disponible como historial bajo demanda. |
   | `inactive` | Dada de baja manualmente sin reemplazo. Caso típico: norma de org que se elimina sin sucesor. |
   | `conflict` | Conflicto de sync pendiente de resolución desde la UI (CAP-3). |
+  | `deleted` | Borrado **cloud-only** (como `upload_at`, DM-15). En cloud: borrado **lógico** — retiene el contenido para auditoría del admin y lo oculta de todo recall. En el local NO es un estado guardado: dispara la **purga física** del contenido. Exclusivo del admin (DM-16). |
 
-- `DM-14` (MUST) — La búsqueda devuelve memorias `active` y `draft` por defecto. `replaced`, `inactive` y `conflict` disponibles bajo demanda (parámetro explícito).
+- `DM-14` (MUST) — La búsqueda devuelve memorias `active` y `draft` por defecto. `replaced`, `inactive` y `conflict` disponibles bajo demanda (parámetro explícito). `deleted` **NUNCA** se devuelve: no existe en el local (purgado) y en cloud solo es accesible por el path de auditoría del admin (DM-16).
 
 ### Campos de la entidad Memory
 
@@ -128,15 +148,30 @@ Organización
   | `content` | Contenido |
   | `topic` | String libre — el "sobre qué". Opcional. |
   | `tag` | Un solo valor del vocabulario controlado (CON-8) |
-  | `author_id` | Trazabilidad únicamente. Seguridad se gestiona via key en el push. |
+  | `author_id` | Autor original. Trazabilidad únicamente. Seguridad se gestiona via key en el push. |
+  | `editor_id` | Quién editó por última vez. Si ≠ `author_id`, fue curación del admin (ID-10). |
   | `org` | Siempre presente — tenant boundary |
   | `proyecto` | Opcional — parte del anclaje |
   | `repo` | Opcional — parte del anclaje |
-  | `lifecycle_state` | draft / active / replaced / inactive / conflict |
+  | `lifecycle_state` | draft / active / replaced / inactive / conflict / deleted (este último cloud-only, DM-16) |
   | `created_at` | Timestamp de creación en el local |
+  | `edited_at` | Timestamp de la última edición (ID-1). Nullable si nunca se editó. |
   | `upload_at` | Timestamp asignado por el cloud al recibir la memoria. Solo vive en cloud. |
 
 > La organización es el **tenant boundary** del sistema (aislamiento de datos y de búsqueda).
+
+### Borrado de memorias
+
+- `DM-16` (MUST) — **El borrado es exclusivo del admin, vía cloud.** El dev no puede borrar (CAP-3). El líder
+  técnico con rol permisado borra una memoria desde la **UI admin del cloud** (login cloud, no la key de sync;
+  mismo path que la escritura org-level, SYNC-3b). Motivos típicos: la memoria **no refleja lo que realmente pasó**, contiene **datos sensibles**
+  de una persona o empresa, o **envenena el proyecto** y no se quiere seguir alimentándolo.
+  - **Cloud → borrado lógico:** `lifecycle_state = deleted`. Retiene el contenido para auditoría del admin y lo
+    oculta de todo recall (DM-14, SRCH-6).
+  - **Local → purga física:** al bajar el delta (SYNC-13) el local **borra físicamente** el contenido. No queda
+    estado: la memoria desaparece del store local.
+  - **Relaciones:** al purgar la memoria en el local se **eliminan también las relaciones que la apuntaban**, en
+    ambas direcciones. No se conserva un puntero a una memoria que ya no existe.
 
 ---
 
@@ -154,6 +189,32 @@ Organización
 - `ID-7` (consecuencia) — La UI local muestra **nombre**, no rol. Para mostrar rol, se consulta el cloud.
 - `ID-8` (MUST) — **Una sola key activa por usuario** a la vez.
 - `ID-9` (MUST) — No se rastrea dispositivo ni ubicación. Autoría = el dev (vía su key) + timestamp.
+- `ID-10` (MUST) — **Autorización de edición:**
+  - **El dev edita solo sus propias memorias** (gate por `author_id`; qué cuenta como "propia", ver ID-12).
+    No puede editar las de otro, aunque las tenga bajadas por sync. Esta edición ocurre en el **local** (UI o agente).
+  - **El admin (líder técnico) puede editar cualquier memoria**, incluidas las de otros, para curación/de-dup.
+    Ocurre **cloud-side** (UI admin + login cloud, mismo path privilegiado que DM-16/SYNC-3b) y baja por fan-out
+    a los locales.
+  - **Trazabilidad:** toda edición actualiza `edited_at` (ID-1) y registra **quién editó** (`editor_id`). Si
+    `editor_id` ≠ `author_id`, queda visible que fue curación del admin — la autoría original **no** se reescribe
+    en silencio.
+- `ID-11` (MUST) — **Identidad local (first-run).** La primera vez que se abre el **visor web local**, el setup
+  pide **nombre + contraseña**. Cumplen roles **distintos**:
+  - **Nombre** = identidad local del dueño de la máquina (el **autor por defecto**, ver ID-12). No es "login".
+  - **Contraseña** = candado de acceso **solo al visor web**. El **MCP no la usa ni la necesita** (NFR-5):
+    la escritura del agente nunca pide login.
+  - Una sola identidad local por instalación; funciona también en orgs local-only (CFG-3, sin cloud).
+- `ID-12` (MUST) — **`author_id` local = sentinel reservado + reescritura en el cloud.**
+  - **Write local:** el MCP estampa `author_id = sentinel reservado` (**`-1`**, "dev local"). Funciona offline
+    y en orgs local-only (CFG-3) sin depender del cloud. Es un valor **reservado por diseño** —jamás un `id_dev`
+    real—; **no se usa `0`** (es el default falsy de una columna entera, colisiona por accidente) **ni `null`**
+    (significa "autor desconocido", no "yo"). En diseño va como **constante con nombre**; si los ids terminan
+    siendo UUID/string, el sentinel pasa a ser un string reservado.
+  - **Upload:** el cloud —que ya identifica al dev por la **key**— **reescribe `author_id` al `id_dev` real** de
+    esa org. La autoridad de identidad es el cloud (ID-2/ID-5), no el id que mandó el local.
+  - **Qué es "propia" en el local** (gate de ID-10): `author_id == -1` **o** `author_id ==` mi `id_dev` en esa
+    org (las que ya volvieron por sync, remapeadas). El gate reconoce **ambos**.
+  - **Local-only:** nunca hay remap; el autor queda `-1` siempre (consistente: `-1` = yo).
 
 ---
 
@@ -256,7 +317,13 @@ Organización
 - `SYNC-1` (MUST) — Store central en **Postgres**.
 - `SYNC-2` (MUST) — Expone una **API** a la que los locales se conectan (push/pull + escritura org permisada).
 - `SYNC-3` (MUST) — Incluye **endpoints de configuración/administración** (enrolar proyectos,
-  gestionar keys/roles, activar/desactivar, etc.).
+  gestionar keys/roles, activar/desactivar, **borrar memorias (DM-16)**, etc.).
+- `SYNC-3b` (MUST) — **Autoría de memorias org-level = exclusiva del cloud.** El líder técnico con rol permisado
+  escribe política org desde una **UI/superficie admin del cloud**, autenticado por **login de cloud** (no por la
+  key de sync). El MCP **no** participa en la escritura org. Una vez creada, la memoria org baja por fan-out
+  (SYNC-5) y vive en todos los locales, legible offline (NFR-7). Consecuencia de seguridad: **ningún local
+  necesita ni guarda una key con permiso org-write** — el privilegio se ejerce server-side, detrás del login de
+  cloud. Mismo path que el borrado admin (DM-16): todo lo privilegiado org-wide vive y se ejecuta en el cloud.
 
 ---
 
@@ -268,7 +335,8 @@ Organización
   > Dirección de diseño: un único servidor local que sirve API + MCP + UI por SSR (server-side rendering). Un solo proceso, un solo binario.
 - `LOCAL-4` (MUST) — Hospeda la **UI del dev** (local-first; lo org-wide consulta el cloud).
 - `LOCAL-5` (MUST) — Se entrega con una **skill/protocolo/preset** que le enseña al modelo qué guardar,
-  cuándo y cómo buscar. **(Pieza crítica: es el cerebro de la captura / calidad señal-sobre-ruido.)**
+  cuándo, cómo buscar y **qué relaciones crear** (recall del target + juicio `extends`/`diverges`/`replaces`,
+  ver CAP-13/CAP-14). **(Pieza crítica: es el cerebro de la captura / calidad señal-sobre-ruido.)**
 - `LOCAL-6` (SHOULD) — Mantiene un **store local** de lo sincronizado (motor a definir en diseño).
 - `LOCAL-7` (MUST) — El instalador despliega el cliente completo: **API local + MCP server + visor web de memorias.**
   > El visor web es una UI local que consume la API local (SQLite). Pendiente de definir en su propia sección.
@@ -329,7 +397,7 @@ Organización
   - **Agente principal:** actualiza el draft durante la sesión y lo finaliza al cierre.
 - `CAP-2` (MUST) — El contenido que la síntesis debe cubrir: decisión, bugfix (con causa raíz), gotcha,
   convención, intento-descartado, hito de proceso… (catálogo definido por la skill, LOCAL-5).
-- `CAP-3` (MUST) — Control **post-hoc** en la UI: **revisar, editar, borrar, fusionar/reemplazar.**
+- `CAP-3` (MUST) — Control **post-hoc** en la UI: **revisar, editar (in-place, ver CAP-12), fusionar/reemplazar.** El dev edita **solo sus propias** memorias (ID-10) y **NO puede borrar** — el borrado es exclusivo del admin vía cloud (DM-16).
 - `CAP-4` (SHOULD) — **Transparencia sin fricción:** vista del draft de la sesión activa y de memorias
   finalizadas recientes. El dev puede ojear qué acumuló el agente antes del cierre.
 - `CAP-5` (MUST) — La calidad recae en la **skill de captura** (`LOCAL-5`), que aplica señal-sobre-ruido.
@@ -354,9 +422,47 @@ Organización
   el contexto de negocio y los involucrados son señal, no riesgo; el residuo semántico real es ultra angosto
   y queda cubierto por A + curación post-hoc. El caso de alta severidad (credencial viva) lo garantiza B.
 
+### Editar vs. reemplazar
+
+- `CAP-12` (MUST) — **Editar (in-place) ≠ reemplazar (`replaces`).** Son las dos formas en que una memoria
+  finalizada evoluciona, y NO son intercambiables:
+  - **Editar** — corrige el registro para que sea **fiel a lo que pasó** o lo **completa**: muta el contenido
+    **en el lugar** (mismo `id`). La versión vieja **nunca fue verdad** (un plan que no se cumplió, un dato mal
+    escrito, pasos que faltaban) → no hay historia que preservar.
+    > Ej.: la memoria decía "se instala la 1.0" y en la práctica se instaló la 2.5; o se agregaron pasos sobre la marcha.
+  - **Reemplazar** — supersesión vía relación `replaces` (DM-10): la vieja **fue verdad en su momento** y el
+    mundo **cambió**. Memoria nueva, la vieja pasa a `replaced` (historial recuperable, VAL-2).
+    > Ej.: las contraseñas se codificaban con X y meses después, por seguridad, se hashean con Y.
+  - **Criterio (vive en la skill, LOCAL-5):** *"¿la versión vieja alguna vez fue verdad?"* → nunca = editar;
+    sí, y dejó de serlo = reemplazar. Es un **juicio de autoría al escribir** (como elegir el tag, CON-8), **no**
+    una re-derivación de validez al leer → no reedita el anti-patrón descartado VAL-5. Coherente con VAL-1.
+  - **Quién edita:** el **agente** puede editar **sus propias** memorias finalizadas durante el trabajo (para
+    darles consistencia con lo realmente hecho), además del humano post-hoc en la UI (CAP-3). La autorización de
+    quién puede editar qué la define ID-10.
+
 > Al elegir captura silenciosa, la red de seguridad se mueve a: (1) la skill de captura (capa blanda **A**),
 > (2) el **filtro determinístico de secretos** (capa dura **B**, write + sync) y (3) la curación post-hoc en
 > la UI. No son opcionales.
+
+### Creación de relaciones
+
+- `CAP-13` (MUST — degradación elegante) — La autoría de relaciones (`extends`, `diverges`, `replaces`) en
+  captura es **best-effort del agente**: el agente las **propone** con el contexto fresco de la sesión. Pero
+  **la captura NUNCA se bloquea ni se pierde por no poder resolver una relación.** Principio:
+  **relación faltante > memoria faltante.** Si el agente no reconoce el target o duda, guarda la memoria
+  **igual, sin la arista**; jamás "no pude relacionarla, no la guardo". Coherente con DM-11 (una relación
+  existe solo si agrega info) y con la filosofía no-destructiva.
+  - **Backstop para `replaces`:** una memoria guardada sin su `replaces` no queda huérfana. Si nace otra con
+    **mismo anclaje + topic + tag**, el mecanismo de conflicto (DM-12) la marca `conflict` en el sync y la
+    sube a la UI para que el dev resuelva (CAP-3). El `replaces` que el agente no puso, el sistema lo caza
+    río abajo.
+  - **`diverges` no tiene backstop automático:** reconocer que la org tiene una norma y que el contexto
+    actual se desvía es **juicio puro del agente** (vive en la skill, LOCAL-5). Si no lo reconoce, se guarda
+    la memoria sin la arista y el dev la agrega a mano (CAP-14).
+- `CAP-14` (MUST) — El **juicio de qué relación crear** (y el recall para encontrar el target) vive en la
+  **skill de captura (LOCAL-5)**, igual que la elección de tag (CON-8) y el editar-vs-reemplazar (CAP-12).
+  La UI local es la **red de seguridad editable**: el dev puede **agregar, corregir o quitar** relaciones de
+  **sus propias** memorias post-hoc (ID-10), además de revisar las que el agente propuso (CAP-3).
 
 ---
 
@@ -370,15 +476,18 @@ LOCAL (cualquier dev, captura IA sin fricción)
         ▼
       CLOUD (fuente de verdad, Postgres)
         ▲
-        │ key con permiso → MCP → escribe org-only
-  org   ← política de empresa (nace en cloud, jamás en local)
+        │ admin → UI admin del cloud (login cloud + rol permisado) → escribe org-only
+  org   ← política de empresa (se AUTORA en cloud; baja por fan-out y vive en local, offline)
         │ fan-out ↓
         ▼
   se descarga a TODOS los locales
 ```
 
 - repo/proyecto → nacen en local, suben por sync.
-- org → nace en el cloud, solo con key permisada, baja a todos.
+- org → **se autora en el cloud** (UI admin, login cloud + rol permisado, ver SYNC-3b), baja a todos por fan-out
+  y **vive en local** (se lee offline como cualquier memoria, NFR-7). "Nace en cloud" = el *origen/escritura* es
+  cloud-only, **no** que viva solo ahí.
+- Los locales **nunca** tienen una key con permiso org-write: la corona se queda detrás del login del cloud.
 - Joya de consistencia: `proyecto = null` (memoria org-only) es exactamente la única que el path
   privilegiado puede crear. Modelo de datos y modelo de permisos encajan sin forzarlos.
 
@@ -405,7 +514,8 @@ LOCAL (cualquier dev, captura IA sin fricción)
   - **`get memory` (detalle):** relaciones con **contenido completo** incluido.
   - Flujo agente: busca → identifica → fetchea detalle cuando necesita profundidad (2 llamadas).
 - `SRCH-6` (MUST) — Recall por defecto devuelve memorias `active` + `draft`. `replaced`, `inactive` y
-  `conflict` disponibles bajo demanda como parámetro explícito. Resuelto por la DB, no por el modelo (VAL-1/3).
+  `conflict` disponibles bajo demanda como parámetro explícito. `deleted` nunca se devuelve (no existe en el
+  local; en cloud solo vía auditoría admin, DM-16). Resuelto por la DB, no por el modelo (VAL-1/3).
 
 ---
 
@@ -428,14 +538,38 @@ LOCAL (cualquier dev, captura IA sin fricción)
 - `SYNC-8` (MUST) — **Primera sync:** al instalar y configurar credenciales, baja todas las memorias
   de la org desde el inicio (sin delta).
   > **Nota de implementación:** definir estrategia de paginación/chunking para orgs grandes cuando se programe.
-- `SYNC-9` (MUST) — **Conflictos:** si dos devs suben una edición de la misma memoria, la API cloud
-  compara timestamps. La que llegó primero gana y queda `active`. La segunda queda con
-  `lifecycle_state = conflict` + relación `caused` automática hacia la ganadora (DM-12).
-  El dev lo resuelve desde la UI (CAP-3).
-- `SYNC-10` (MUST) — **Key revocada:** si el sync recibe respuesta "key inactiva" del cloud,
-  el local purga todas las memorias de esa org. Útil para offboarding de devs.
+- `SYNC-9` (MUST) — **Conflictos de edición:** como solo el autor edita su memoria (ID-10), el caso "dos devs
+  editan la misma memoria" **no puede ocurrir entre devs distintos**; queda acotado al **mismo autor en dos
+  máquinas** (multi-device). Si llegan dos ediciones del mismo `id`, la API compara timestamps: la primera gana
+  `active`, la segunda queda `lifecycle_state = conflict` + relación `caused` automática hacia la ganadora (DM-12).
+  El dev lo resuelve desde la UI (CAP-3). La edición del **admin** sobre memoria ajena es cloud-side y baja por
+  pull → su conflicto con una edición local no pusheada del autor lo maneja SYNC-12.
+- `SYNC-10` (MUST) — **Key revocada (offboarding) — flujo de purga:**
+  1. El local sincroniza y el cloud responde `"key inactiva"` (ID-6).
+  2. Si la `purge_executed_at` de esa org está **vacía**, el local **purga TODAS las memorias de la org** — corte
+     limpio: lo bajado del cloud **y** lo que el propio dev autoró para esa org.
+  3. El local **avisa al cloud** que purgó. El cloud acepta la key inactiva **solo** para registrar la confirmación
+     (ya la identificó en el paso 1; no sirve para ninguna otra operación).
+  4. El cloud **registra la purga confirmada** para esa key → señal de offboarding consultable: "purga confirmada"
+     vs. "pendiente".
+  5. El local setea `purge_executed_at`. De ahí en más el sync **sigue intentando y fallando** (NFR-8) pero **no
+     vuelve a purgar** mientras `purge_executed_at` tenga valor (guardia de idempotencia).
+  - **Después de la purga:** el dev puede seguir generando memorias nuevas en esa org si quiere — quedan **locales
+    y nunca sincronizan**. Es cosa suya.
+  - **Limitación conocida (local-first):** la purga solo se ejecuta cuando el local **reconecta**. Una máquina que
+    nunca vuelve a conectarse conserva la data hasta que lo haga; el cloud **no puede forzar** el borrado remoto.
+    La confirmación (paso 4) hace el estado **observable**, no lo garantiza.
+  - **Re-contratación:** se emite una **key nueva** (ID-8) → config de org nueva → first-sync completo (SYNC-8).
+    La `purge_executed_at` vieja muere con la key vieja.
+  - **Campo:** `purge_executed_at` es **estado local por org** (no es campo de la entidad Memory): nullable,
+    vacío = purga pendiente, con fecha = purga hecha.
+- `SYNC-10b` (MUST) — **Key inexistente / inválida (≠ revocada):** si la key nunca fue válida (typo, no enrolada),
+  el local **no sincroniza** (ni baja ni sube) y **NO purga nada** — las memorias locales quedan intactas. La purga
+  (SYNC-10) se dispara **solo** con la respuesta específica `"key inactiva"` de una key reconocida-pero-revocada.
+  Distinguir ambos casos es **obligatorio**: jamás purgar por un error de tipeo.
 - `SYNC-11` (MUST) — **Orden del ciclo:** pull primero, luego push. Se baja el estado del cloud antes de subir cambios locales para minimizar conflictos.
 - `SYNC-12` (MUST) — **Conflicto detectado en pull:** si el pull trae una versión actualizada de una memoria que el dev también editó localmente (aún no pusheada), el local aplica la versión cloud y marca la edición local como `conflict`. El dev resuelve desde la UI antes de que esa memoria se pushee.
+- `SYNC-13` (MUST) — **Borrado admin (fan-out):** cuando el admin borra una memoria (DM-16), el cloud la marca `deleted` y le asigna un `upload_at` nuevo. Baja por el cursor de pull como cualquier delta; cada local que la tenía **purga físicamente** el contenido y las relaciones que la apuntaban (DM-16). El **first-sync** (SYNC-8) no envía memorias `deleted` — en un local nuevo no hay nada que purgar. Como el ciclo es **pull primero** (SYNC-11), el borrado le gana a una edición local no pusheada: el local purga y descarta su edición.
 
 ---
 
@@ -448,10 +582,21 @@ LOCAL (cualquier dev, captura IA sin fricción)
 
 ### Privacidad
 - `NFR-4` (SHOULD) — Datos en tránsito sobre **HTTPS/TLS**. Preferente; evaluar vs otros protocolos en diseño.
-- `NFR-5` (MUST) — **Dos capas de identidad independientes:**
-  - **Login local:** da acceso a la UI únicamente. Funciona también en org local-only (CFG-3, sin sync). No requiere cloud.
+- `NFR-5` (MUST) — **Capas de identidad independientes:**
+  - **Login local:** **nombre + contraseña** definidos en el first-run del visor (ID-11). La **contraseña**
+    da acceso a la UI **únicamente**; el **nombre** es la identidad local / autor por defecto (ID-12). Funciona
+    también en org local-only (CFG-3, sin sync). No requiere cloud. El MCP no usa este login.
   - **API key de org:** conecta el local al cloud para sync. Puede estar ausente en setups local-only.
+    **Solo autoriza sync** — nunca escritura org-level.
+  - **Login admin del cloud:** autentica al líder técnico contra el cloud para las operaciones privilegiadas
+    org-wide (escribir política org, SYNC-3b; borrar, DM-16). Independiente del login local y de la key de sync;
+    vive solo en el cloud.
   - **MCP:** sin autenticación. Acceso local libre — el agente IA lo consume directamente sin login.
+  - **Principio (autenticación ≠ autorización):** autenticar al llamador local **no es lo mismo** que autorizar la
+    operación. El MCP no autentica → la **escritura local es siempre libre** (no se bloquea ni con key inválida).
+    La **autorización de todo lo que toca el cloud vive server-side**, contra la key de org (ID-5). Consecuencia:
+    la key de org es la llave para **sincronizar**, no para escribir. Key inválida = local aislado pero 100%
+    funcional (NFR-7).
 - `NFR-6` (MUST) — Ver `SYNC-10`: key revocada → purga local de memorias de esa org.
 
 ### Comportamiento offline
