@@ -127,7 +127,7 @@ Organización
 - `DM-10` (MUST) — **Relaciones dirigidas entre memorias** = aristas de primera clase. Set v1:
   - **`replaces`** — B reemplaza a A. A queda en estado `replaced` (historial recuperable). Cubre correcciones, revisiones y reversiones (el motivo va en el texto de la memoria).
   - **`extends`** — B agrega información a A sin invalidarla. Ambas válidas; recall puede encadenarlas.
-  - **`caused`** — A originó a B (ej: una decisión de diseño causó un bug). No requiere que ambas existan: B puede apuntar a una causa no documentada.
+  - **`caused`** — A originó a B (ej: una decisión de diseño causó un bug). **Ambas memorias deben existir** (como toda arista: borrar un nodo elimina sus relaciones, DM-16/SYNC-13). Si la causa **no está documentada** como memoria, va en el **texto** de B (causa raíz, CAP-2), **no** como arista.
   - **`diverges`** — B (proyecto/repo) se sale de la norma establecida por A (org) en ese contexto específico. A sigue `active` y vigente para el resto. El motivo va en el texto de B (SEM-6).
 - `DM-11` (MUST — principio) — Una relación existe **solo si agrega información que el anclaje no provee por sí solo.** No todas las memorias necesitan estar relacionadas.
   Se descartan: `conflicts_with` (si dos memorias se contradicen, una reemplaza a la otra), `related` (sin caso concreto que topic+tag no cubra → ruido).
@@ -184,9 +184,11 @@ Organización
 
 ### Borrado de memorias
 
-- `DM-16` (MUST) — **El borrado es exclusivo del admin, vía cloud.** El dev no puede borrar (CAP-3). El líder
-  técnico con rol permisado borra una memoria desde la **UI admin del cloud** (login cloud, no la key de sync;
-  mismo path que la escritura org-level, SYNC-3b). Motivos típicos: la memoria **no refleja lo que realmente pasó**, contiene **datos sensibles**
+- `DM-16` (MUST) — **El borrado de memorias consolidadas es exclusivo del admin, vía cloud.** El dev no puede borrar
+  lo que ya es `active` (CAP-3); **sí** puede **descartar sus propios drafts** (excepción al final de DM-16). El admin borra
+  desde la **consola admin del cloud** (Sección 17; login cloud, no la key de sync; mismo path que la escritura
+  org-level, SYNC-3b), con alcance según el rol (ADM-3/ADM-4): el **`cloud-admin`** borra **cualquier** memoria de
+  la org; el **`project-admin`**, solo las de **sus proyectos asignados** (ADM-8). Motivos típicos: la memoria **no refleja lo que realmente pasó**, contiene **datos sensibles**
   de una persona o empresa, o **envenena el proyecto** y no se quiere seguir alimentándolo.
   - **Cloud → borrado lógico:** `lifecycle_state = deleted`. Retiene el contenido para auditoría del admin y lo
     oculta de todo recall (DM-14, SRCH-6).
@@ -194,6 +196,11 @@ Organización
     estado: la memoria desaparece del store local.
   - **Relaciones:** al purgar la memoria en el local se **eliminan también las relaciones que la apuntaban**, en
     ambas direcciones. No se conserva un puntero a una memoria que ya no existe.
+  - **Excepción — descartar drafts propios:** el dev **sí** puede borrar sus **propios** `draft` (DM-13). Un draft
+    es **local y privado** (nunca se pushea, SYNC-6) → descartarlo es **purga local sin fan-out**: no toca el grafo
+    compartido ni huérfana aristas de nadie (a lo sumo aristas locales propias, que cascadean en su máquina). Es la
+    **válvula** que evita que un draft abandonado se **auto-finalice** a `active` (CAP-10). La exclusividad del admin
+    aplica a memorias **consolidadas** (`active` en adelante), no al borrador privado.
 
 ---
 
@@ -214,9 +221,10 @@ Organización
 - `ID-10` (MUST) — **Autorización de edición:**
   - **El dev edita solo sus propias memorias** (gate por `author_id`; qué cuenta como "propia", ver ID-12).
     No puede editar las de otro, aunque las tenga bajadas por sync. Esta edición ocurre en el **local** (UI o agente).
-  - **El admin (líder técnico) puede editar cualquier memoria**, incluidas las de otros, para curación/de-dup.
-    Ocurre **cloud-side** (UI admin + login cloud, mismo path privilegiado que DM-16/SYNC-3b) y baja por fan-out
-    a los locales.
+  - **El admin puede editar memorias ajenas** para curación/de-dup, con alcance según el rol (ADM-3/ADM-4): el
+    **`cloud-admin`** edita **cualquier** memoria de la org; el **`project-admin`**, solo las de **sus proyectos
+    asignados** (ADM-7). Ocurre **cloud-side** (consola admin, Sección 17, + login cloud, mismo path privilegiado
+    que DM-16/SYNC-3b) y baja por fan-out a los locales.
   - **Trazabilidad:** toda edición actualiza `edited_at` (ID-1) y registra **quién editó** (`editor_id`). Si
     `editor_id` ≠ `author_id`, queda visible que fue curación del admin — la autoría original **no** se reescribe
     en silencio.
@@ -327,7 +335,10 @@ Organización
   - tag **conocido** → se guarda ese tag;
   - el modelo **no aplica ninguno** (nada encaja) → memoria **sin tag** (decisión legítima);
   - el modelo manda un tag **desconocido** (typo / local desactualizado) → se guarda con **`no_clasificado`**.
-  `no_clasificado` ≠ sin tag: es una **señal diagnóstica** (si abundan, hay locales con la tabla vieja).
+  `no_clasificado` ≠ sin tag: es una **señal diagnóstica** (si abundan, hay locales con la tabla vieja). Es además un
+  **valor reservado del sistema**: lo asigna el **código** (el modelo nunca lo elige) y **no es parte del vocabulario
+  de CON-8** — por eso no figura en la lista de tags ni en el whitelist (CON-10) como un tag normal, igual que el
+  sentinel `-1` del autor (ID-12). La skill (CON-8) nunca lo usa como tag real.
 - `CON-12` (nota) — Frecuencia esperada de cambios de vocabulario: **alta solo en bootstrap** (mientras se
   define el set), luego **prácticamente congelado**. Por eso se elige el modelo estático (skill) sobre el
   dinámico (tabla cloud): optimizar un cambio que casi no ocurre sería over-engineering.
@@ -420,7 +431,8 @@ Organización
   en toda la org, válida como **clave del mapping org-level** de proyectos.
 - `RES-8` (MUST) — **Asignación de proyecto y precedencia.** El proyecto de un repo (identificado por su `origin`,
   RES-7) sale de dos fuentes posibles:
-  - **Mapping org-level:** el admin declara en el cloud "`origin` X → proyecto Y". **Baja por sync** (mismo
+  - **Mapping org-level:** un admin (`cloud-admin`, o `project-admin` sobre sus proyectos, ver ADM-11) declara en el
+    cloud "`origin` X → proyecto Y". **Baja por sync** (mismo
     fan-out que las memorias org, SYNC-5); el local resuelve repo→proyecto **solo**, sin config por dev.
   - **Config local declarativa** (RES-1): el dev lo declara en `.memoria/config.*`.
   - **Precedencia — gana el mapping de la org.** Para repos de una org, el mapping org-level **gana sobre la
@@ -443,11 +455,16 @@ Organización
   - La sesión existe como **borrador (draft)** en el store local desde el inicio. El agente lo va
     actualizando a medida que ocurren cosas. Al cierre se finaliza como memoria permanente.
   - Ventaja: si la conversación se corta, el draft preserva lo acumulado hasta ese momento.
-  - **Sub-agentes:** guardan su memoria al terminar la tarea, con el tag que corresponde a lo que hicieron.
-  - **Agente principal:** actualiza el draft durante la sesión y lo finaliza al cierre.
+  - **Sub-agentes:** cada uno crea **su propia memoria en estado `draft`** (con el tag que corresponde a su
+    tarea) para que pueda ir creciendo. No se consolida al terminar la tarea: la promoción a `active` la hace
+    el agente principal al cierre de la sesión.
+  - **Agente principal:** actualiza su draft durante la sesión y, al cierre, **consolida (promueve a `active`)**
+    su draft y los de los sub-agentes.
+  - **Múltiples drafts:** durante una sesión pueden coexistir **varios drafts vivos** (el del principal + uno
+    por sub-agente). La mecánica exacta de promoción —flag, fecha, estado normalizado— se define en diseño.
 - `CAP-2` (MUST) — El contenido que la síntesis debe cubrir: decisión, bugfix (con causa raíz), gotcha,
   convención, intento-descartado, hito de proceso… (catálogo definido por la skill, LOCAL-5).
-- `CAP-3` (MUST) — Control **post-hoc** en la UI: **revisar, editar (in-place, ver CAP-12), fusionar/reemplazar.** El dev edita **solo sus propias** memorias (ID-10) y **NO puede borrar** — el borrado es exclusivo del admin vía cloud (DM-16).
+- `CAP-3` (MUST) — Control **post-hoc** en la UI: **revisar, editar (in-place, ver CAP-12), fusionar/reemplazar.** El dev edita **solo sus propias** memorias (ID-10) y **NO puede borrar memorias consolidadas** — el borrado es exclusivo del admin vía cloud (DM-16). **Excepción:** sí puede **descartar sus propios drafts** (local/privado, DM-16).
 - `CAP-4` (SHOULD) — **Transparencia sin fricción:** vista del draft de la sesión activa y de memorias
   finalizadas recientes. El dev puede ojear qué acumuló el agente antes del cierre.
 - `CAP-5` (MUST) — La calidad recae en la **skill de captura** (`LOCAL-5`), que aplica señal-sobre-ruido.
@@ -463,14 +480,22 @@ Organización
   conservan tal cual (pueden identificar proveedores, involucrados o casos de uso de ejemplo). Lo único que
   el sistema oculta son secretos/API keys.
 - `CAP-9` (decisión) — Se **descarta** la clasificación de sensibilidad / sync con scope (opción "C"):
-- `CAP-11` (MUST) — **Reanudación de sesión:** si el dev retoma una conversación interrumpida (corte de luz,
-  crash, cierre inesperado), el agente detecta el draft activo existente y lo continúa en lugar de crear uno
-  nuevo. La memoria y el contexto de la sesión se reanudan desde donde quedaron.
-- `CAP-10` (MUST) — **Draft huérfano:** si un borrador de sesión lleva más de **5 días sin cerrarse**,
-  el sistema lo finaliza automáticamente. Criterio: cubre fines de semana y feriados largos (hasta 4 días)
-  sin penalizar al dev que retoma el lunes o el martes.
   el contexto de negocio y los involucrados son señal, no riesgo; el residuo semántico real es ultra angosto
   y queda cubierto por A + curación post-hoc. El caso de alta severidad (credencial viva) lo garantiza B.
+- `CAP-10` (MUST) — **Draft huérfano:** si un draft lleva más de **5 días sin cerrarse**, el sistema lo
+  **finaliza automáticamente** (lo promueve a `active`) y entra al ciclo de sync (SYNC-6). Criterio del umbral:
+  cubre fines de semana y feriados largos (hasta 4 días) sin penalizar al dev que retoma el lunes o el martes.
+  **Fundamento:** una memoria a medio terminar vale más como documentación que no tener ninguna — se asume
+  deliberadamente el costo de consolidar un borrador incompleto antes que perderlo.
+- `CAP-11` (MUST) — **Reanudación de sesión:** al retomar trabajo en un proyecto (incluido un corte de luz,
+  crash o cierre inesperado), el agente busca un draft **pertinente al cambio en curso** —no necesariamente el
+  último abierto, ya que pueden coexistir varios (CAP-1)— antes de crear uno nuevo. Dos caminos:
+  - **Draft aún activo** (< 5 días, CAP-10): lo **continúa** desde donde quedó, preservando el contexto acumulado.
+  - **Draft ya auto-finalizado** por antigüedad (CAP-10): esa memoria ya es `active` y sincronizó → el agente
+    **abre un draft nuevo** para el trabajo actual (la transición `draft → active` es unidireccional, VIS-11c).
+    Si corresponde, lo vincula a la memoria anterior vía `extends` (CAP-13) para no perder el hilo narrativo.
+  > El recall del draft pertinente (por anclaje/topic) vive en la **skill de captura** (LOCAL-5), igual que el
+  > resto del juicio de captura.
 
 ### Editar vs. reemplazar
 
@@ -496,7 +521,7 @@ Organización
 
 ### Creación de relaciones
 
-- `CAP-13` (MUST — degradación elegante) — La autoría de relaciones (`extends`, `diverges`, `replaces`) en
+- `CAP-13` (MUST — degradación elegante) — La autoría de relaciones (`extends`, `diverges`, `replaces`, `caused`) en
   captura es **best-effort del agente**: el agente las **propone** con el contexto fresco de la sesión. Pero
   **la captura NUNCA se bloquea ni se pierde por no poder resolver una relación.** Principio:
   **relación faltante > memoria faltante.** Si el agente no reconoce el target o duda, guarda la memoria
@@ -514,6 +539,11 @@ Organización
   - **`diverges` no tiene backstop automático:** reconocer que la org tiene una norma y que el contexto
     actual se desvía es **juicio puro del agente** (vive en la skill, LOCAL-5). Si no lo reconoce, se guarda
     la memoria sin la arista y el dev la agrega a mano (CAP-14).
+  - **`caused` no tiene backstop automático** (igual que `diverges`): el caso típico es documentar un `bugfix`
+    cuya causa raíz rastrea a una memoria existente (`design`/`decision`) que el agente encuentra por recall
+    (CAP-14). El agente la **propone** memoria→memoria, con ambos extremos existentes (DM-10). Si la causa **no
+    está documentada** como memoria, no se infiere arista: va en el **texto** de la memoria (causa raíz, CAP-2).
+    Si el agente no reconoce el target, se guarda sin la arista y el dev la agrega a mano (CAP-14).
 - `CAP-14` (MUST) — El **juicio de qué relación crear** (y el recall para encontrar el target) vive en la
   **skill de captura (LOCAL-5)**, igual que la elección de tag (CON-8) y el editar-vs-reemplazar (CAP-12).
   La UI local es la **red de seguridad editable**: el dev puede **agregar, corregir o quitar** relaciones de
@@ -745,8 +775,9 @@ LOCAL (cualquier dev, captura IA sin fricción)
 ### Acciones de curación
 
 - `VIS-7` (MUST) — **Acciones sobre memorias propias** (gate por `author_id`, ID-10/ID-12): **editar contenido**
-  (in-place, CAP-12), **editar el `tag`**, y **agregar/corregir/quitar relaciones** (CAP-14). **Borrar NO** — es
-  exclusivo del admin vía cloud (DM-16). La edición del admin sobre memoria ajena es cloud-side (ID-10).
+  (in-place, CAP-12), **editar el `tag`**, y **agregar/corregir/quitar relaciones** (CAP-14). **Borrar NO** memorias
+  consolidadas — es exclusivo del admin vía cloud (DM-16); **sí** puede **descartar drafts propios** (DM-16). La
+  edición del admin sobre memoria ajena es cloud-side (ID-10).
 - `VIS-8` (MUST) — **Re-anclaje (mover una memoria en el árbol org/proyecto/repo).**
   - **Cruzar de org: IMPOSIBLE.** Inviable por el aislamiento estricto (CFG-4, tenant boundary): una memoria
     **pertenece a su org**. Para "moverla" a otra org, se **recrea** a mano allá; no se mueve.
@@ -759,9 +790,11 @@ LOCAL (cualquier dev, captura IA sin fricción)
   - **Coherencia con RES-8:** para memorias a nivel repo, el proyecto lo determina el `origin` del repo (mapping
     org, RES-8); el re-anclaje entre proyectos aplica de lleno a **memorias de proyecto** (`repo = null`) o, en
     repos, implica reconocer a qué repo/proyecto corresponde realmente.
-  - **Re-anclaje por el admin (excepción):** el admin **puede re-anclar memorias ajenas** (de cualquier autor)
-    y **sin el límite de 30 días** — coherente con ID-10 (el admin cura cualquier memoria). El límite temporal
-    es un freno para el **autor**; el admin tiene autoridad sobre el grafo y reorganiza cuando haga falta. Ocurre
+  - **Re-anclaje por el admin (excepción):** el admin **puede re-anclar memorias ajenas** y **sin el límite de 30
+    días** — coherente con ID-10. El alcance depende del rol (ADM-3/ADM-4, ADM-9): el **`cloud-admin`** re-ancla
+    **cualquier** memoria en toda la org; el **`project-admin`**, solo cuando **origen y destino** caen en sus
+    proyectos asignados (cruzar fuera de su dominio = `cloud-admin`). El límite temporal es un freno para el
+    **autor**; el admin tiene autoridad sobre el grafo y reorganiza cuando haga falta. Ocurre
     **cloud-side** (mismo path privilegiado que DM-16/ID-10) y baja por fan-out; queda trazado en `editor_id`/
     `edited_at` (ID-10). **El cruce de org sigue imposible también para el admin:** es un límite **estructural**
     (CFG-4, NFR-11 — cada org es un cloud aparte), no un permiso que el rol pueda saltar.
@@ -772,8 +805,10 @@ LOCAL (cualquier dev, captura IA sin fricción)
   `lifecycle_state = conflict` (SYNC-9 multi-device, o SYNC-12 local-vs-pull), el visor la muestra como
   pendiente de resolución y permite **reconciliar contenido**: ver ambas versiones (la `active` ganadora y la
   marcada `conflict`), y **mergear o elegir** cuál queda como vigente. **No** ofrece crear `replaces` ni `caused`:
-  son dos versiones de la **misma** memoria, no dos memorias distintas (DM-12). Al resolver, la versión elegida
-  queda `active` y la otra se descarta.
+  son dos versiones de la **misma** memoria, no dos memorias distintas (DM-12). Al resolver, la memoria (el **mismo `id`**)
+  **sigue existiendo** con el contenido elegido (`active`); lo que se deja de lado es la **versión perdedora**, no la
+  memoria. **No es un borrado** (DM-16): la memoria no desaparece ni se rompen sus relaciones — es el dev ajustando
+  el contenido de **su propia** memoria (ID-10).
 - `VIS-10` (MUST) — **Vista de posibles duplicados (ids distintos).** Aparte del flujo de conflicto, el visor
   agrupa memorias con **mismo anclaje + topic + tag** pero **`id` distinto** (backstop de CAP-13) como
   **candidatas de baja confianza** a revisar. **La agrupación es señal estructural, no una afirmación de
@@ -793,10 +828,14 @@ LOCAL (cualquier dev, captura IA sin fricción)
     (`author_id == -1` **o** `== mi id_dev` en esa org) de las **solo-lectura** (de otros devs bajadas por
     fan-out, y memorias org que nacen cloud-side del admin). La señal es visible **antes** de intentar editar,
     para que las acciones de VIS-7 no sorprendan al dev.
-  - **(c) Draft de sesión activa (CAP-4):** el visor muestra el draft con badge **"borrador"**. El draft **es
-    editable a mano** por el dev en el visor: puede **editarlo y mantenerlo `draft`**, o **editarlo y promoverlo
-    a memoria consolidada (`active`)** cuando quiera. La promoción también la hace el **agente** al cerrar la
-    sesión (CAP-2); ambos caminos —dev manual y agente automático— confluyen en la misma transición.
+  - **(c) Drafts activos (CAP-4):** un dev puede tener **varios drafts simultáneos** porque un draft es una
+    memoria **anclada** (DM-1) como cualquier otra: varios por sesión (principal + sub-agentes, CAP-1) y, a lo
+    largo del tiempo, uno por cada **proyecto/repo** en el que viene trabajando. El visor los muestra **cada uno
+    en su lugar del árbol de anclaje** (VIS-3) con badge **"borrador"**, no como un único draft global. Cada
+    draft **es editable a mano** por el dev: puede **editarlo y mantenerlo `draft`**, **editarlo y promoverlo a
+    `active`**, o **descartarlo** (borrado local de un draft propio — la válvula contra que un draft abandonado se
+    auto-finalice, CAP-10/DM-16) cuando quiera. La promoción también la hace el **agente** al cerrar la sesión (CAP-1) o el sistema
+    al **auto-finalizar a los 5 días** (CAP-10); todos los caminos confluyen en la misma transición.
     - **Transición unidireccional `draft → active`.** Una memoria consolidada **nunca** vuelve a `draft`.
       Fundamento: `active` sincroniza (SYNC-6) y puede estar ya **linkeada/buscada por otros**; degradarla a
       `draft` (local, no-sync) la **sacaría del cloud** y rompería las relaciones que la apuntan.
@@ -805,9 +844,107 @@ LOCAL (cualquier dev, captura IA sin fricción)
       No es el flujo habitual —normalmente el draft lo finaliza el agente al cierre (CAP-2)— pero la promoción
       manual **no interrumpe** la sesión.
 
+## 17. Visor/consola cloud (admin)
+
+> Superficie **cloud-side** de las operaciones privilegiadas org-wide. Es la **hermana de la Sección 16** pero del
+> otro lado del sync: el visor local (VIS-1) lee del **local** y lo opera el dev por agente; esta consola lee del
+> **cloud** y la opera un humano del **tier admin** por web. Consolida responsabilidades dispersas a lo largo del PRD
+> (SYNC-3/SYNC-3b, DM-16, ID-2/ID-5/ID-6/ID-10, VIS-8, RES-8, DM-14, y el "login admin del cloud" de NFR-5).
+>
+> **Principio de uso:** lo privilegiado es **humano y cloud-side**, no agéntico. El cloud **cura** memorias de
+> proyecto y **autora** política org; lo que **nunca** hace es **capturar** una memoria de proyecto — la captura
+> (CAP-*) es exclusiva del borde (dev local + agente). El admin trabaja **a mano**.
+
+### Naturaleza y alcance
+
+- `ADM-1` (MUST) — **Lee del cloud, no del local.** A diferencia del visor local (VIS-1, que lee SQLite local), la
+  consola admin opera contra el **cloud**, donde viven las operaciones privilegiadas y la retención para auditoría
+  (DM-16). Es una **UI web** autenticada por **login cloud** (ADM-6), operada **a mano** por humanos del tier admin.
+  **No pasa por el agente ni por el MCP del dev.**
+- `ADM-2` (MUST) — **v1 = solo visor web; sin MCP admin.** Un eventual MCP que asista al admin es **feature futura**
+  y, aun cuando llegue, su alcance queda **acotado a curación sobre lo existente** — **nunca** a capturar memorias de
+  proyecto cloud-side. Las memorias de proyecto **nacen solo en el borde** (CAP-*).
+
+### Roles y autorización
+
+- `ADM-3` (MUST) — **Tres roles, por organización** (cierra ID-5; cada org es un cloud aparte, NFR-11/CFG-4 → se
+  puede ser `cloud-admin` en una org y `dev` en otra):
+  - **`dev`** (default) — captura en el borde (CAP-*), cura **solo lo propio** (VIS-7, ID-10), lee toda la org por
+    fan-out (local). **Cero cloud-side.**
+  - **`project-admin`** — **todo dentro de sus proyectos asignados** (editar/borrar/auditar/re-anclar memorias
+    ajenas, scopeado) **+ crear proyectos nuevos** (quedan a su cargo: self-grant) **+ linkear repos**
+    (`origin`→proyecto, RES-8) en su dominio. **No** hace nada org-wide ni asigna roles.
+  - **`cloud-admin`** — **todo, siempre.** Org-wide (política, keys/roles), todas las memorias, toda la estructura,
+    asignar roles.
+- `ADM-4` (MUST) — **Gate de autorización, centralizado y puro-cloud.** Como **toda** acción privilegiada es
+  cloud-side, el local **no necesita** conocer roles (y no los conoce, ID-3/ID-7). El chequeo vive solo en el cloud:
+  - **Curación por-memoria** (editar/borrar/auditar/re-anclar una memoria): *"¿tu autoridad cubre el proyecto de
+    esta memoria?"* — `cloud-admin`: siempre (scope = org); `project-admin`: si el proyecto ∈ sus grants; `dev`:
+    nunca.
+  - **Acciones org-level** (política org, keys/roles, asignar roles): **`cloud-admin` only**.
+  - **Cruces de dominio** (re-anclar o re-mapear fuera del propio dominio): **`cloud-admin`**. El **cruce de org** es
+    imposible para todos — límite **estructural** (CFG-4), no un permiso que el rol pueda saltar (VIS-8).
+- `ADM-5` (MUST) — **Frontera de seguridad: el rol no se auto-propaga.** Un `project-admin` puede **crear y componer
+  sus propios proyectos**, pero **asignar el rol a otra persona es `cloud-admin` only**. Ampliás tu **dominio**,
+  nunca el **poder de un tercero**.
+- `ADM-6` (MUST) — **Login cloud e identidad** (cierra el "login admin del cloud" de NFR-5):
+  - **Credenciales = email + `password_hash`**, independientes de la key de sync (ID-2/ID-8) y del password del
+    visor **local** (ID-11): son **tres credenciales distintas**.
+  - Login cloud **solo para el tier admin** (`cloud-admin` + `project-admin`), porque ambos curan cloud-side. El
+    `dev` **no loguea al cloud** (trabaja local + agente + key de sync). **Futuro:** si el dev gana lectura cloud,
+    ahí recién gana login (read-only) — aditivo.
+  - **Tablas online** (nunca bajan a local): `users` (`id_dev`, `nombre_dev`, `role`, `email?`, `password_hash?`) y
+    `project_admin_grants` (`id_dev`, `project_id`). A local **solo** bajan `id_dev` + `nombre_dev` (ID-3); role,
+    grants, email y pw **se quedan online** (ID-5).
+
+### Curación de memorias (cloud-side)
+
+- `ADM-7` (MUST) — **Editar memoria ajena** (ID-10), scopeada por ADM-4. Toda edición actualiza `edited_at` y
+  registra `editor_id`; si `editor_id` ≠ `author_id`, queda visible que fue **curación del admin** — la autoría
+  original **no** se reescribe (ID-10). Baja por fan-out a los locales.
+- `ADM-8` (MUST) — **Borrar** (DM-16), scopeado por ADM-4. Es **borrado lógico** en el cloud (`lifecycle_state =
+  deleted`): retiene el contenido para auditoría (ADM-10). Baja por el cursor de pull como cualquier delta y cada
+  local que la tenía **purga físicamente** el contenido y sus relaciones (SYNC-13). El `dev` **no** puede borrar
+  (CAP-3/DM-16).
+- `ADM-9` (MUST) — **Re-anclar memoria ajena sin el límite de 30 días** (VIS-8), scopeado por ADM-4. Para
+  `project-admin`, **ambos extremos** (origen y destino) deben caer en su dominio; cruzar fuera = `cloud-admin`. El
+  cruce de org sigue imposible (CFG-4). Trazado en `editor_id`/`edited_at` (ID-10).
+- `ADM-10` (MUST) — **Auditoría de `deleted`** (cierra DM-14). Las memorias `deleted` retienen contenido en el cloud
+  (ADM-8) y son accesibles **solo** por este path de auditoría, scopeado por ADM-4 (un `project-admin` audita las de
+  sus proyectos; `cloud-admin`, todas). **Nunca** se devuelven en recall normal ni existen en el local (purgadas,
+  DM-14/DM-16).
+
+### Estructura de la org (cloud-side)
+
+- `ADM-11` (MUST) — **Crear proyectos y linkear repos** (`origin`→proyecto, RES-8). Un `project-admin` **crea
+  proyectos** (quedan a su cargo: self-grant) y **mapea repos** dentro de su dominio; el `cloud-admin`, en toda la
+  org. El mapping **baja por sync** y es lo que permite al agente resolver **repo→proyecto solo** (RES-7/RES-8), sin
+  config por dev y sin degradado heurístico (RES-4). **Colisión:** un `origin` es **único** (RES-7) → mapea a **un**
+  proyecto; linkear un `origin` **sin mapear** es libre, sacarlo del dominio de otro = `cloud-admin`.
+- `ADM-12` (MUST) — **Autorar política org** (SYNC-3b) — **`cloud-admin` only**. Es escritura **org-level**, no
+  curación de una memoria de proyecto.
+- `ADM-13` (MUST) — **Gestionar keys/roles y enrolamiento** (SYNC-3, ID-2/ID-5/ID-6) — **`cloud-admin` only**:
+  enrolar organizaciones/devs, asignar roles y grants (ADM-5) y activar/desactivar keys (revocar sin borrar, ID-6).
+
 ## Decisiones abiertas / a definir en diseño
 - Mandatos duros de seguridad/compliance (campo `fuerza` en memoria org) — diferido, v1 todo overridable.
 - Motor del store local (`LOCAL-6`) — a definir en diseño.
 - Stack / lenguaje — sugerencia: binario único tipo Go. No cerrado; a definir en diseño.
 - Formato exacto del archivo `.memoria/config.*` — a definir en diseño.
-- **Visor web de memorias** — UI local que consume la API local (SQLite). Requiere su propia sección de requerimientos (qué muestra, qué acciones permite el dev, relación con CAP-3).
+- **Reconciliación de proyecto local provisional ↔ mapping org (cerca de RES-8)** — cuando baja un mapping
+  org que cubre un repo de un proyecto local bootstrapeado (`sync_id = NULL`), el local debe **adoptar** la
+  identidad del cloud (rellenar `sync_id`, tomar el nombre autoritativo) **keyeando por `origin`**, sin
+  re-apuntar memorias (el id local absorbe la identidad cloud → cero rewrite de FKs). Las memorias ya subidas
+  se reconcilian solas en el cloud por `origin` (no por nombre). Caso 1-repo: **automático + evento pasivo**
+  en el visor (no degradado silencioso, RES-4). Caso multi-repo con destinos distintos: **partir** el proyecto
+  local (resolución por `origin` o confirmación del dev) — *pendiente de cerrar*.
+- **Almacenamiento de credencial — fallback local opcional (relacionado con CFG-6/LOCAL-8):** por defecto la
+  credencial de org vive en el **secret store del OS** (CFG-6, protección más fuerte). **Opción opt-in:** guardarla
+  también en el **local** (SQLite o archivo aparte) para entornos **sin keychain** (Linux headless) o sync
+  desatendido sin depender del contexto de usuario. Debe guardarse **cifrada at-rest, NO hasheada** — un token que
+  se reenvía al cloud tiene que ser **recuperable**; el hash es irreversible y solo sirve para *verificar* (como la
+  password del visor, ID-11), no para *reusar*. **Caveat honesto:** sin passphrase del usuario (que rompería el sync
+  desatendido), la llave de cifrado queda accesible al daemon → la protección real degrada a **permisos de archivo
+  (0600) + ofuscación**, no criptografía fuerte. Trade-off seguridad/conveniencia **explícito y opt-in**; el default
+  sigue siendo el keychain del OS. Cubre también la decisión de **contexto del daemon** (user-session vs system
+  service, LOCAL-8).
