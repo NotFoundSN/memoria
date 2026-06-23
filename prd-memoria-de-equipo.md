@@ -1,6 +1,6 @@
 # PRD — Memoria de equipo (contexto de proyectos con IA)
 
-> **Estado:** 6 gaps de refinamiento cerrados — listo para diseño. Última sesión: 2026-06-19.
+> **Estado:** 6 gaps de refinamiento cerrados — listo para diseño. Última sesión: 2026-06-23 (incorporado #1554: LWW + `memory_versions`, sin estado `conflict`).
 > **Sesión 2026-06-16 mañana:** Búsqueda, Sync, No-funcionales.
 > **Sesión 2026-06-16 tarde:** Modelo de datos — entidad Memory completa, topic como string, tag como valor único,
 > lista preferente de tags (v1), relaciones entre memorias, lifecycle de memorias,
@@ -39,6 +39,11 @@
 > se garantiza con validación server-side, sin reescribir aristas en cada subida.
 > **Estados pasivos del visor (VIS-11):** último sync (NFR-9), read-only vs editable (ID-10/12), draft editable con
 > promoción **unidireccional** `draft → active` (el agente abre uno nuevo si se promueve a mitad de sesión).
+> **Sesión 2026-06-23:** Incorporado #1554 al PRD — **LWW automático para conflictos de edición**, eliminado el estado
+> `conflict` del lifecycle (DM-12, DM-13, DM-14, DM-15). Agregada tabla **`memory_versions`** con historial completo
+> de ediciones (audit trail, DM-12). SYNC-9 y SYNC-12 pasan a resolución automática sin intervención del dev.
+> VIS-9 cambia de "resolución de conflictos" a "historial de ediciones" (consulta, no resuelve). Barrido completo:
+> DM-12/13/14/15, SYNC-6/9/12, SRCH-6, VIS-6, VIS-9, CAP-13.
 > **Principio de uso del visor:** primariamente para visualizar; el agente es el canal de trabajo; curación mínima
 > en el visor. **Re-anclaje por admin (VIS-8):** puede re-anclar memorias ajenas **sin límite de fecha**, cloud-side;
 > el cruce de org sigue imposible (estructural). **→ Gap #1 cerrado: los 6 gaps del PRD quedan completos.**
@@ -131,18 +136,17 @@ Organización
   - **`diverges`** — B (proyecto/repo) se sale de la norma establecida por A (org) en ese contexto específico. A sigue `active` y vigente para el resto. El motivo va en el texto de B (SEM-6).
 - `DM-11` (MUST — principio) — Una relación existe **solo si agrega información que el anclaje no provee por sí solo.** No todas las memorias necesitan estar relacionadas.
   Se descartan: `conflicts_with` (si dos memorias se contradicen, una reemplaza a la otra), `related` (sin caso concreto que topic+tag no cubra → ruido).
-- `DM-12` (MUST) — **Conflicto de sync = misma memoria (mismo `id`), dos versiones divergentes** (edición
-  multi-device del mismo autor, SYNC-9; o local-vs-pull, SYNC-12). El cloud **marca la versión perdedora con
-  `lifecycle_state = conflict`**. **No crea ninguna relación `caused`:** `caused` (DM-10) relaciona dos memorias
-  **distintas**, y acá ambas versiones son la **misma** memoria — una arista hacia sí misma no tiene sentido.
-  La resolución es **reconciliar contenido** (mergear o elegir versión), no crear un `replaces`. Se resuelve
-  desde la UI (CAP-3, VIS-9).
+- `DM-12` (MUST) — **Conflicto de edición = misma memoria (mismo `id`), dos versiones divergentes** (edición
+  multi-device del mismo autor, SYNC-9; o local-vs-pull, SYNC-12). Se resuelve **automáticamente por LWW**
+  (last-write-wins por timestamp): la versión con timestamp más reciente gana y queda `active`; la perdedora
+  se guarda como snapshot en **`memory_versions`** (tabla append-only con historial completo de ediciones)
+  y queda recuperable, pero **no genera estado `conflict`** ni requiere intervención del dev. **Sin relación
+  `caused`:** son dos versiones de la **misma** memoria, no dos memorias distintas (DM-10).
   - **Distinguir de la redundancia:** dos memorias con **`id` distinto** pero mismo anclaje+topic+tag **no son
     un conflicto**; son **supersesión** vía `replaces` (lo propone el agente en captura —gap #6, CAP-13— o lo
-    crea el dev curando). No llevan `lifecycle_state = conflict` ni `caused`. La UI las ofrece como **posibles
-    duplicados** (VIS-10), no como conflicto.
+    crea el dev curando). La UI las ofrece como **posibles duplicados** (VIS-10).
   - **Distinguir de la colisión accidental de `id`:** mismo `id` pero memorias **distintas** (otro anclaje/topic)
-    es un problema de **identidad**, no de contenido: el cloud re-asigna el ID (SYNC-14). Nunca llega a `conflict`.
+    es un problema de **identidad**, no de contenido: el cloud re-asigna el ID (SYNC-14).
 
 ### Lifecycle de memorias
 
@@ -154,10 +158,9 @@ Organización
   | `active` | Vigente. Devuelta por defecto en búsquedas. |
   | `replaced` | Fue reemplazada por otra vía relación `replaces`. Disponible como historial bajo demanda. |
   | `inactive` | Dada de baja manualmente sin reemplazo. Caso típico: norma de org que se elimina sin sucesor. |
-  | `conflict` | Conflicto de sync pendiente de resolución desde la UI (CAP-3). |
   | `deleted` | Borrado **cloud-only** (como `upload_at`, DM-15). En cloud: borrado **lógico** — retiene el contenido para auditoría del admin y lo oculta de todo recall. En el local NO es un estado guardado: dispara la **purga física** del contenido. Exclusivo del admin (DM-16). |
 
-- `DM-14` (MUST) — La búsqueda devuelve memorias `active` y `draft` por defecto. `replaced`, `inactive` y `conflict` disponibles bajo demanda (parámetro explícito). `deleted` **NUNCA** se devuelve: no existe en el local (purgado) y en cloud solo es accesible por el path de auditoría del admin (DM-16).
+- `DM-14` (MUST) — La búsqueda devuelve memorias `active` y `draft` por defecto. `replaced` e `inactive` disponibles bajo demanda (parámetro explícito). `deleted` **NUNCA** se devuelve: no existe en el local (purgado) y en cloud solo es accesible por el path de auditoría del admin (DM-16).
 
 ### Campos de la entidad Memory
 
@@ -175,7 +178,7 @@ Organización
   | `org` | Siempre presente — tenant boundary |
   | `proyecto` | Opcional — parte del anclaje |
   | `repo` | Opcional — parte del anclaje |
-  | `lifecycle_state` | draft / active / replaced / inactive / conflict / deleted (este último cloud-only, DM-16) |
+  | `lifecycle_state` | draft / active / replaced / inactive / deleted (este último cloud-only, DM-16) |
   | `created_at` | Timestamp de creación en el local |
   | `edited_at` | Timestamp de la última edición (ID-1). Nullable si nunca se editó. |
   | `upload_at` | Timestamp asignado por el cloud al recibir la memoria. Solo vive en cloud. |
@@ -534,8 +537,8 @@ Organización
     (complementarias) o no tener relación. La heurística solo **filtra candidatos baratos para revisar**; la
     decisión de crear el `replaces` exige **juicio semántico sobre el contenido**, que vive en dos lugares y
     **jamás en inferencia automática**: (a) el **agente en captura**, con contenido fresco + recall (CAP-14);
-    (b) el **dev en el visor**, mirando el contenido y pudiendo descartar (VIS-10). **No es un conflicto**
-    (DM-12 es solo para mismo `id`): no se marca `lifecycle_state = conflict` ni se crea `caused`.
+    (b) el **dev en el visor**, mirando el contenido y pudiendo descartar (VIS-10). No se marca
+    `lifecycle_state = conflict` (ese estado ya no existe — DM-12 usa LWW automático) ni se crea `caused`.
   - **`diverges` no tiene backstop automático:** reconocer que la org tiene una norma y que el contexto
     actual se desvía es **juicio puro del agente** (vive en la skill, LOCAL-5). Si no lo reconoce, se guarda
     la memoria sin la arista y el dev la agrega a mano (CAP-14).
@@ -598,8 +601,8 @@ LOCAL (cualquier dev, captura IA sin fricción)
   - **`search`:** relaciones **shallow** — array `{id, title, type, direction}`. Sin contenido de memorias relacionadas.
   - **`get memory` (detalle):** relaciones con **contenido completo** incluido.
   - Flujo agente: busca → identifica → fetchea detalle cuando necesita profundidad (2 llamadas).
-- `SRCH-6` (MUST) — Recall por defecto devuelve memorias `active` + `draft`. `replaced`, `inactive` y
-  `conflict` disponibles bajo demanda como parámetro explícito. `deleted` nunca se devuelve (no existe en el
+- `SRCH-6` (MUST) — Recall por defecto devuelve memorias `active` + `draft`. `replaced` e `inactive`
+  disponibles bajo demanda como parámetro explícito. `deleted` nunca se devuelve (no existe en el
   local; en cloud solo vía auditoría admin, DM-16). Resuelto por la DB, no por el modelo (VAL-1/3).
 
 ---
@@ -613,7 +616,7 @@ LOCAL (cualquier dev, captura IA sin fricción)
   de la org** (no solo los del dev). ~150MB estimado para la org de referencia (75K memorias), tamaño manejable.
   > Topics no se sincronizan por separado: viajan como string en la memoria. La lista de topics conocidos
   > se deriva localmente con una query al store (DM-9).
-- `SYNC-6` (MUST) — **Push:** memorias nuevas/editadas (`active`, `replaced`, `inactive`, `conflict`) + relaciones
+- `SYNC-6` (MUST) — **Push:** memorias nuevas/editadas (`active`, `replaced`, `inactive`) + relaciones
   acumuladas desde el último sync. Los `draft` **nunca se sincronizan** — son locales hasta que se finalizan.
 - `SYNC-7` (MUST) — **Cursor de delta:** el cloud asigna `upload_at` a cada memoria al recibirla.
   Los clientes usan ese campo como cursor ("dame todo con `upload_at` > mi último sync").
@@ -623,13 +626,13 @@ LOCAL (cualquier dev, captura IA sin fricción)
 - `SYNC-8` (MUST) — **Primera sync:** al instalar y configurar credenciales, baja todas las memorias
   de la org desde el inicio (sin delta).
   > **Nota de implementación:** definir estrategia de paginación/chunking para orgs grandes cuando se programe.
-- `SYNC-9` (MUST) — **Conflictos de edición:** como solo el autor edita su memoria (ID-10), el caso "dos devs
-  editan la misma memoria" **no puede ocurrir entre devs distintos**; queda acotado al **mismo autor en dos
-  máquinas** (multi-device). Si llegan dos ediciones del mismo `id`, la API compara timestamps: la primera gana
-  `active`, la segunda queda `lifecycle_state = conflict` (DM-12). **Sin relación `caused`:** son dos versiones de
-  la **misma** memoria, así que la resolución es **reconciliar contenido** (mergear/elegir versión), no crear una
-  arista. El dev lo resuelve desde la UI (CAP-3, VIS-9). La edición del **admin** sobre memoria ajena es cloud-side y baja por
-  pull → su conflicto con una edición local no pusheada del autor lo maneja SYNC-12.
+- `SYNC-9` (MUST) — **Conflictos de edición (LWW automático):** como solo el autor edita su memoria (ID-10),
+  el caso "dos devs editan la misma memoria" **no puede ocurrir entre devs distintos**; queda acotado al
+  **mismo autor en dos máquinas** (multi-device). Si llegan dos ediciones del mismo `id`, la API compara
+  timestamps: la más reciente gana (`active`), la perdedora se guarda como snapshot en **`memory_versions`**
+  (DM-12). **Resolución automática, sin intervención del dev, sin estado `conflict`.** La edición del
+  **admin** sobre memoria ajena es cloud-side y baja por pull → su conflicto con una edición local no
+  pusheada del autor lo maneja SYNC-12 (también LWW automático).
 - `SYNC-10` (MUST) — **Key revocada (offboarding) — flujo de purga:**
   1. El local sincroniza y el cloud responde `"key inactiva"` (ID-6).
   2. Si la `purge_executed_at` de esa org está **vacía**, el local **purga TODAS las memorias de la org** — corte
@@ -654,7 +657,10 @@ LOCAL (cualquier dev, captura IA sin fricción)
   (SYNC-10) se dispara **solo** con la respuesta específica `"key inactiva"` de una key reconocida-pero-revocada.
   Distinguir ambos casos es **obligatorio**: jamás purgar por un error de tipeo.
 - `SYNC-11` (MUST) — **Orden del ciclo:** pull primero, luego push. Se baja el estado del cloud antes de subir cambios locales para minimizar conflictos.
-- `SYNC-12` (MUST) — **Conflicto detectado en pull:** si el pull trae una versión actualizada de una memoria que el dev también editó localmente (aún no pusheada), el local aplica la versión cloud y marca la edición local como `conflict`. El dev resuelve desde la UI antes de que esa memoria se pushee.
+- `SYNC-12` (MUST) — **Conflicto detectado en pull (LWW automático):** si el pull trae una versión actualizada
+  de una memoria que el dev también editó localmente (aún no pusheada), el local aplica la versión cloud y guarda
+  la edición local como snapshot en **`memory_versions`**. Resolución automática, sin intervención del dev, sin
+  estado `conflict` (DM-12). El dev puede consultar `memory_versions` si necesita recuperar su edición descartada.
 - `SYNC-13` (MUST) — **Borrado admin (fan-out):** cuando el admin borra una memoria (DM-16), el cloud la marca `deleted` y le asigna un `upload_at` nuevo. Baja por el cursor de pull como cualquier delta; cada local que la tenía **purga físicamente** el contenido y las relaciones que la apuntaban (DM-16). El **first-sync** (SYNC-8) no envía memorias `deleted` — en un local nuevo no hay nada que purgar. Como el ciclo es **pull primero** (SYNC-11), el borrado le gana a una edición local no pusheada: el local purga y descarta su edición.
 - `SYNC-14` (MUST) — **Colisión accidental de `id` (no es conflicto de contenido):** con UUID v7 generado en local,
   la probabilidad de que dos memorias **distintas** saquen el mismo `id` es ínfima (requiere mismo milisegundo +
@@ -666,7 +672,7 @@ LOCAL (cualquier dev, captura IA sin fricción)
     **actualiza la memoria y reescribe sus aristas locales** apuntando al `id` nuevo. Es un **fallback de emergencia**
     (probabilidad ≈ cero, acotado a una sola memoria), no la mecánica normal de sync.
   - **`UPDATE` con `id` ya existente** → es la **misma** memoria, dos versiones → **conflicto de edición** (SYNC-9),
-    se reconcilia contenido. No se re-asigna nada.
+    se resuelve automáticamente por LWW; la perdedora va a `memory_versions` (DM-12). No se re-asigna nada.
   - **Por qué no doble `id` (local + cloud):** la garantía de unicidad se obtiene con esta validación server-side
     sobre el ID único; un segundo ID obligaría a una tabla de traducción local↔cloud y a **reescribir aristas en
     cada subida** (no solo en la colisión). El UUID v7 mantiene identidad estable desde el nacimiento (DM-15).
@@ -769,7 +775,7 @@ LOCAL (cualquier dev, captura IA sin fricción)
   corazonada.
   - **Escape innegociable:** un click ensancha a "todo el proyecto" o "toda la org" (caso de uso (a),
     estandarizar org-wide).
-  - **Filtros adicionales:** por `tag` (SRCH-4) y por `lifecycle` (SRCH-6, `replaced`/`inactive`/`conflict` bajo
+  - **Filtros adicionales:** por `tag` (SRCH-4) y por `lifecycle` (SRCH-6, `replaced`/`inactive` bajo
     demanda). Motor BM25 local (SRCH-1), siempre offline.
 
 ### Acciones de curación
@@ -799,17 +805,15 @@ LOCAL (cualquier dev, captura IA sin fricción)
     `edited_at` (ID-10). **El cruce de org sigue imposible también para el admin:** es un límite **estructural**
     (CFG-4, NFR-11 — cada org es un cloud aparte), no un permiso que el rol pueda saltar.
 
-### Resolución de conflictos y duplicados
+### Historial de ediciones y duplicados
 
-- `VIS-9` (MUST) — **Resolución de conflicto de edición (mismo `id`).** Cuando una memoria propia quedó en
-  `lifecycle_state = conflict` (SYNC-9 multi-device, o SYNC-12 local-vs-pull), el visor la muestra como
-  pendiente de resolución y permite **reconciliar contenido**: ver ambas versiones (la `active` ganadora y la
-  marcada `conflict`), y **mergear o elegir** cuál queda como vigente. **No** ofrece crear `replaces` ni `caused`:
-  son dos versiones de la **misma** memoria, no dos memorias distintas (DM-12). Al resolver, la memoria (el **mismo `id`**)
-  **sigue existiendo** con el contenido elegido (`active`); lo que se deja de lado es la **versión perdedora**, no la
-  memoria. **No es un borrado** (DM-16): la memoria no desaparece ni se rompen sus relaciones — es el dev ajustando
-  el contenido de **su propia** memoria (ID-10).
-- `VIS-10` (MUST) — **Vista de posibles duplicados (ids distintos).** Aparte del flujo de conflicto, el visor
+- `VIS-9` (MUST) — **Historial de ediciones de una memoria.** El visor permite consultar el historial
+  completo de ediciones de una memoria desde **`memory_versions`** (DM-12): lista cronológica de snapshots
+  con `version`, `edited_at`, `edited_on` y `author_id`. Lectura solamente — el historial es append-only.
+  **No hay UI de resolución de conflictos:** los conflictos de edición se resuelven automáticamente por
+  LWW (SYNC-9, SYNC-12), sin intervención del dev. Si el dev necesita recuperar contenido de una versión
+  anterior, lo copia manualmente en una nueva edición.
+- `VIS-10` (MUST) — **Vista de posibles duplicados (ids distintos).** Aparte del historial de ediciones, el visor
   agrupa memorias con **mismo anclaje + topic + tag** pero **`id` distinto** (backstop de CAP-13) como
   **candidatas de baja confianza** a revisar. **La agrupación es señal estructural, no una afirmación de
   duplicado:** el visor **no infiere la relación ni crea nada automáticamente**. El **dev revisa el contenido**
