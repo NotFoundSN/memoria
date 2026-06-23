@@ -1,6 +1,6 @@
 # Esquemas / Modelo físico — estado y reanudación
 
-> **Última actualización:** 2026-06-22. **Doc vivo.** Punto de reanudación para definir el **DDL** del proyecto
+> **Última actualización:** 2026-06-23. **Doc vivo.** Punto de reanudación para definir el **DDL** del proyecto
 > (las tablas SQL reales), usando los modelos de **engram** como contrapunto.
 > Fuente conceptual: `prd-memoria-de-equipo.md` (modelo de datos, secciones 2-3, DM-*, ID-*, ADM-*).
 
@@ -16,20 +16,24 @@
 
 | Tabla del proyecto | Estado | Equivalente en engram | Diferencia clave |
 |---|---|---|---|
-| `memories` | ✅ aprobada (concepto) | `observations` | **single UUID v7** vs **dual id** de engram (INTEGER PK + `sync_id` TEXT); suma `org/proyecto/repo` (engram: `project` string plano); `tag` controlado + `topic` (engram: solo `topic_key`, **sin tags**); `lifecycle_state` explícito (engram: `deleted_at` soft + estado computado) |
+| `memories` | 🟡 concepto (falta #1554) | `observations` | **single UUID v7** (id `TEXT` en SQLite) vs **dual id** de engram (INTEGER PK + `sync_id` TEXT); suma `org/proyecto/repo` (engram: `project` string plano); `tag` controlado + `topic` (engram: solo `topic_key`, **sin tags**); `lifecycle_state` explícito. **⚠️ incorporar #1554:** lifecycle SIN `conflict` (LWW) |
+| `memory_versions` (perdedor LWW, #1554) | ❌ falta | **no existe** | append-only keyed por uuid; guarda el perdedor de LWW recuperable (reemplaza la UI de `conflict`, ahora eliminado) |
 | `users` + `api_keys` + `project_admin_grants` | ✅ aprobada (org/credenciales) | `cloud_users` | **3 credenciales separadas** (key de sync / password del visor ID-11 / login cloud ADM-6); engram tiene solo `cloud_users` y la key es config, no vive en DB |
 | `memory_relations` | ✅ **cerrada** (DDL abajo) | `memory_relations` | vocab `replaces/extends/caused/diverges` + **validez resuelta por la DB** (VAL-1); engram usa `related/compatible/supersedes/...` + `judgment_status` + `confidence`, multi-actor **sin UNIQUE** en `(source,target)` |
-| `organizations` (tenant boundary) | ❌ falta | **no existe** | engram no tiene tenant/org; acá org = aislamiento duro (CFG-4, NFR-11) |
-| `projects` + `repos` + `repo_topology` + mapping `origin→proyecto` | ❌ falta | **no existe** | engram **adivina por nombre de carpeta** (RES-4, criticado); acá mapping explícito por `origin` (RES-7/RES-8/ADM-11) |
+| `org` (tenant boundary) | ✅ **cerrada** (DDL abajo) | **no existe** | engram no tiene tenant/org; acá org = aislamiento duro (CFG-4, NFR-11). **LOCAL-only, sin token** (secreto en keychain del OS, CFG-6) |
+| `project` + `repo` | ✅ **cerrada** (DDL abajo) | **no existe** | id local + clave estable (mecanismo 1): `repo.origin` (RES-7), `project.sync_id` cloud-assigned; engram **adivina por carpeta** (RES-4, criticado) |
+| `repo_topology` + mapping `origin→proyecto` | ❌ falta (topología = **próximo tema**) | **no existe** | aristas dirigidas repo→repo (DM-5) + mapping explícito (RES-8/ADM-11) |
 | `tag_vocabulary` (normalización local) | ❌ falta | **no existe** | engram no tiene tags; whitelist derivada de la skill (CON-8/CON-10) |
 | sync: `sync_state` + outbox + cursors + audit | ❌ falta | `sync_state`, `sync_mutations`, `cloud_mutations`, `cloud_sync_audit_log` | engram lo tiene **muy maduro** — **adoptar el patrón** (3 cursores: enqueued/acked/pulled + outbox FIFO) |
 | `memories_fts` (FTS5) | ❌ falta definir | `observations_fts` | mismo patrón FTS5+BM25 (prd:583) — copiable casi directo |
 
 ## Orden de trabajo propuesto (por dependencias de FK)
 
-1. **Estructura de anclaje** — `organizations → projects → repos → repo_topology → mapping origin→proyecto`.
-   Es la base de la que cuelgan las FK de `memories`, y es donde engram **no tiene nada** (máximo diferencial).
-2. **`memories`** — escribir el DDL real con las FK de anclaje (concepto ya aprobado, DM-15).
+1. **Estructura de anclaje** — ✅ `org → project → repo` **cerradas** (DDL abajo). Falta `repo_topology` +
+   mapping `origin→proyecto` (**próximo tema**). Es la base de la que cuelgan las FK de `memories`, y es donde
+   engram **no tiene nada** (máximo diferencial).
+2. **`memories`** — escribir el DDL real con las FK de anclaje (concepto aprobado, DM-15). ⚠️ **Antes incorporar
+   #1554** (LWW / eliminar `conflict` / tabla `memory_versions`) — ver "Decisiones ya tomadas".
 3. ~~**`memory_relations`** — aristas dirigidas (DM-10) + validez por DB (VAL-1).~~ ✅ **cerrada** (ver DDL abajo).
 4. **`tag_vocabulary`** — normalización local derivada de la skill (CON-10).
 5. **Sync** — `sync_state` + outbox + cursors + audit (reusar patrón de engram).
@@ -47,6 +51,17 @@
 - **Credenciales:** tres separadas — key de sync (online, ID-2/ID-8) / password del visor local (ID-11) / login cloud admin (ADM-6).
   Tablas online que nunca bajan a local: `users`, `project_admin_grants`, tabla de keys. `prd:ID-2/ID-5, ADM-6`
 - **Tags:** vocabulario controlado (CON-8); storage varchar; validación contra tabla de normalización local materializada de la skill (CON-10).
+- **Conflicto de edición (LWW) — hilo #1554 (engram, pendiente de bajar al PRD):** dos ediciones de la MISMA
+  memoria (mismo uuid, multi-device del mismo autor) se resuelven **last-write-wins** por timestamp, **NO** con UI
+  de reconciliación. El perdedor queda **recuperable** como snapshot → **se ELIMINA el estado `conflict`**. Falta
+  una tabla **`memory_versions` append-only keyed por uuid** (fork abierto: solo el perdedor de LWW vs cada edición
+  = audit completo; recomendado: **mínimo**). **Esto cambia el DDL de `memories`** (lifecycle sin `conflict`) y
+  agrega `memory_versions`. Barrido pendiente en el PRD: DM-12/13/14, SYNC-6/9/12, VIS-9, SRCH-6.
+- **Anclaje (org/project/repo) — cerrado, mecanismo 1:** `memory` guarda **FK enteros LOCALES**; el sync traduce a
+  **clave estable** (`repo.origin` RES-7 / `project.sync_id` cloud / org implícita). Los ids locales nunca viajan.
+  El **doble-id** (local int + sync_id) es OK en project/repo —nada cuelga de su id— pero **NO** en `memory`
+  (las `memory_relations` cuelgan del uuid) → single UUID. `org` es **LOCAL-only** y **sin token** (secreto en el
+  keychain del OS, CFG-6). Detalle en engram, topic `prd/data-model/anchor-tables`.
 - **Pendientes abiertos (del commit de hoy):** reconciliación proyecto-local provisional ↔ mapping org (cerca de RES-8);
   fallback local opcional de credencial cifrada at-rest (no hasheada) para entornos sin keychain (CFG-6/LOCAL-8). `prd:934-950`
 
@@ -54,27 +69,74 @@
 
 ## DDL cerrado
 
-### `memory_relations` (cerrada 2026-06-22)
+### Anclaje — `org` / `project` / `repo` (cerrado 2026-06-23, LOCAL/SQLite)
 
 ```sql
+CREATE TABLE org (
+  id        INTEGER PRIMARY KEY,
+  name      TEXT NOT NULL,
+  cloud_url TEXT                        -- NULL = pseudo-org LOCAL (CFG-3); el secreto NO va acá (keychain OS, CFG-6)
+);
+CREATE UNIQUE INDEX idx_org_one_local ON org((cloud_url IS NULL)) WHERE cloud_url IS NULL;  -- a lo sumo una LOCAL
+
+CREATE TABLE project (
+  id      INTEGER PRIMARY KEY,
+  org_id  INTEGER NOT NULL REFERENCES org(id),
+  name    TEXT NOT NULL,
+  sync_id TEXT                          -- id estable del cloud; NULL = provisional/LOCAL (lo crea el admin, ADM-11)
+);
+
+CREATE TABLE repo (
+  id         INTEGER PRIMARY KEY,
+  org_id     INTEGER NOT NULL REFERENCES org(id),        -- denormalizado (habilita el UNIQUE y el lookup origin→proyecto)
+  project_id INTEGER NOT NULL REFERENCES project(id),    -- DM-2: no hay repo sin proyecto
+  origin     TEXT    NOT NULL,                           -- git origin = identidad estable (RES-7)
+  role       TEXT,                                       -- back/front/service... varchar, no enum (≈CON-9)
+  UNIQUE (org_id, origin)                                -- un origin = un repo por org (RES-7/ADM-11)
+);
+```
+
+**Mecanismo 1 (id local + clave estable):** `memory` referencia el anclaje por **FK entero local** (joins compactos
+para scope/topología); el **sync traduce** a clave estable (`repo.origin`, `project.sync_id`, org implícita). Los ids
+locales nunca cruzan el wire → la dualidad de ids no genera conflicto. Falta `repo_topology` (próximo tema).
+
+### `memory_relations` (cerrada 2026-06-22)
+
+**LOCAL (SQLite):**
+```sql
 CREATE TABLE memory_relations (
-    source_id  UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    target_id  UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    relation   TEXT NOT NULL CHECK (relation IN ('replaces','extends','caused','diverges')),
-    author_id  INTEGER NOT NULL DEFAULT -1,            -- quién creó la arista (ID-12); el cloud remapea
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),     -- creación local
-    upload_at  TIMESTAMPTZ,                            -- sello del cloud al recibir; NULL en local pre-sync (coherente DM-15)
+    source_id  TEXT    NOT NULL REFERENCES memories(id) ON DELETE CASCADE,  -- uuid v7 (id TEXT, coherente con memories local)
+    target_id  TEXT    NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation   TEXT    NOT NULL CHECK (relation IN ('replaces','extends','caused','diverges')),
+    author_id  INTEGER NOT NULL DEFAULT -1,            -- sentinel local (ID-12); el cloud remapea al id_dev real
+    created_at INTEGER NOT NULL,                        -- epoch millis UTC (creación local)
     PRIMARY KEY (source_id, target_id, relation),
     CHECK (source_id <> target_id)
 );
 CREATE INDEX idx_memrel_target ON memory_relations(target_id);  -- traversal inverso (SRCH-5); el de salida (VIS-5) lo cubre la PK
+```
+> **Sin `upload_at` en el local** — es cursor cloud-only (SYNC-7), igual que en `memories`.
+
+**CLOUD (PostgreSQL):**
+```sql
+CREATE TABLE memory_relations (
+    source_id  UUID        NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id  UUID        NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation   TEXT        NOT NULL CHECK (relation IN ('replaces','extends','caused','diverges')),
+    author_id  BIGINT      NOT NULL REFERENCES users(id),   -- id_dev real (remapeado desde la key al subir, ID-12)
+    created_at TIMESTAMPTZ NOT NULL,                        -- creación local, viaja con la arista
+    upload_at  TIMESTAMPTZ NOT NULL DEFAULT now(),          -- sello del cloud al recibir = cursor de pull (SYNC-7)
+    PRIMARY KEY (source_id, target_id, relation),
+    CHECK (source_id <> target_id)
+);
+CREATE INDEX idx_memrel_target ON memory_relations(target_id);
 ```
 
 **Decisiones y porqué:**
 - **No se copia engram.** Su `memory_relations` es una tabla de **juicio de compatibilidad semántica** (LLM judge: `confidence`, `judgment_status`, `evidence`, `marked_by_model`, multi-actor sin UNIQUE). La nuestra modela **relaciones narrativas declaradas**, con la **validez resuelta por la DB** (VAL-1, `VAL-5` descartado). Casi ningún campo de engram aplica → de ~16 columnas a 6.
 - **Sin `id` propio.** `(source_id, target_id, relation)` ya identifica unívocamente. Un surrogate solo serviría para darle al sync una `entity_key` de una columna (como el `sync_id` `rel-` de engram), pero eso es **uniformidad de la capa de sync, no identidad**. Se revisita SOLO si el diseño de la tabla de sync lo pide. Nada referencia a una arista (no versionamos aristas; la supersesión vive en la memoria, `lifecycle=replaced`).
 - **`FK NOT NULL` en ambos extremos + `ON DELETE CASCADE`.** Habilitado porque `caused` exige que **ambas memorias existan** (DM-10, reescrito en commit `422f255`). Engram permite aristas colgantes (`target` NULL); nosotros las prohibimos → integridad referencial pura.
-- **`upload_at`** = sello del cloud al recibir, mismo patrón que `Memory` (DM-15). **Sin `edited_at`:** una arista no se edita — "corregir" es borrar + crear (su identidad **es** la terna).
+- **`upload_at` solo en el cloud** = sello al recibir y cursor de pull (SYNC-7), mismo patrón que `memories` (**no vive en el local**). **Sin `edited_at`:** una arista no se edita — "corregir" es borrar + crear (su identidad **es** la terna).
 - **Caveat local/cloud:** el `CASCADE` protege solo el **LOCAL** (purga física, SYNC-13). En cloud el borrado es **lógico** (`lifecycle=deleted`, un `UPDATE`) → ocultar las aristas de una memoria `deleted` es **por query**, no por FK.
 
 **Deuda que traslada a la skill (LOCAL-5, aún no escrita):** al sacar el judge de la DB, el juicio de *cuándo/cómo* nace cada arista recae entero en la skill de captura. Por relación: `replaces` (reconocer corrección/reversión; recall por anclaje+topic+tag; estructural ≠ semántico, VIS-10); `extends` (amplía sin invalidar; recall por topic); `caused` (causa **documentada** → arista, si no → al texto, CAP-2); `diverges` (norma org + desvío; recall org-level; **sin backstop**). Principio: **relación faltante > memoria faltante** (CAP-13); red de seguridad = dev en el visor (CAP-14/VIS-7).
