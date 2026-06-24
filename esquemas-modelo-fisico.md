@@ -26,7 +26,7 @@
 | mapping `origin→proyecto` (autoritativo cloud) | 🟡 parcial (local: `repo.origin`+`project_id`) | **no existe** | mapping org-level que baja por sync (RES-8/ADM-11) — se cierra con sync |
 | `tag_vocabulary` (normalización local) | ❌ falta | **no existe** | engram no tiene tags; whitelist derivada de la skill (CON-8/CON-10) |
 | sync: `sync_state` + outbox + cursors + audit | ❌ falta | `sync_state`, `sync_mutations`, `cloud_mutations`, `cloud_sync_audit_log` | engram lo tiene **muy maduro** — **adoptar el patrón** (3 cursores: enqueued/acked/pulled + outbox FIFO) |
-| `memories_fts` (FTS5) | ❌ falta definir | `observations_fts` | mismo patrón FTS5+BM25 (prd:583) — copiable casi directo |
+| `memories_fts` (FTS5) | ✅ **cerrada** (DDL abajo, **Opción A**) | `observations_fts` | external-content + `content_rowid` entero estable; **impone `local_id INTEGER PK` en `memories`**; índice **LOCAL-only/derivado** (nunca sincroniza); filtros por JOIN, no en el índice |
 
 ## Orden de trabajo propuesto (por dependencias de FK)
 
@@ -34,11 +34,13 @@
    mapping `origin→proyecto` autoritativo (cloud, baja por sync) — se cierra con sync. Es la base de la que
    cuelgan las FK de `memories`, y es donde engram **no tiene nada** (máximo diferencial).
 2. **`memories`** — escribir el DDL real con las FK de anclaje (concepto aprobado, DM-15). ✅ **#1554
-   incorporado** (LWW + `memory_versions` + barrido PRD).
+   incorporado** (LWW + `memory_versions` + barrido PRD). 🔒 **Opción A (FTS) ya fijó la identidad:**
+   `local_id INTEGER PRIMARY KEY` (rowid local) + `id TEXT NOT NULL UNIQUE` (uuid v7).
 3. ~~**`memory_relations`** — aristas dirigidas (DM-10) + validez por DB (VAL-1).~~ ✅ **cerrada** (ver DDL abajo).
 4. **`tag_vocabulary`** — normalización local derivada de la skill (CON-10).
 5. **Sync** — `sync_state` + outbox + cursors + audit (reusar patrón de engram).
-6. **`memories_fts`** — virtual table FTS5 + triggers (copiar patrón de engram).
+6. ~~**`memories_fts`** — virtual table FTS5 + triggers.~~ ✅ **cerrada** (Opción A, DDL abajo). Impuso
+   `local_id INTEGER PK` en `memories` (paso 2).
 
 > Nota: lo aprobado de "organización" suena a **users/keys/grants** (auth), distinto de la **estructura de anclaje**
 > (org/proyecto/repo/topología). Confirmar al reanudar qué cubrió exactamente la aprobación previa.
@@ -47,7 +49,8 @@
 
 - **Identidad:** UUID v7 único (no dual id local/cloud como engram). Unicidad por validación server-side; colisión
   accidental se resuelve re-asignando el id (SYNC-14), no mergeando. `prd:DM-15, 46, 671`
-- **Búsqueda:** FTS5 + BM25 en SQLite local, igual que engram. `prd:583`
+- **Búsqueda:** FTS5 + BM25 en SQLite local, igual que engram. Índice **local-only y derivado** (nunca sincroniza);
+  external-content sobre `local_id` (**Opción A**, cerrada 2026-06-23). `prd:583`
 - **Resolución repo→proyecto:** mapping org-level explícito keyed por `origin` de git; sin heurística por carpeta. `prd:RES-7/RES-8`
 - **Credenciales:** tres separadas — key de sync (online, ID-2/ID-8) / password del visor local (ID-11) / login cloud admin (ADM-6).
   Tablas online que nunca bajan a local: `users`, `project_admin_grants`, tabla de keys. `prd:ID-2/ID-5, ADM-6`
@@ -223,6 +226,79 @@ CREATE INDEX idx_memrel_target ON memory_relations(target_id);
 - **Caveat local/cloud:** el `CASCADE` protege solo el **LOCAL** (purga física, SYNC-13). En cloud el borrado es **lógico** (`lifecycle=deleted`, un `UPDATE`) → ocultar las aristas de una memoria `deleted` es **por query**, no por FK.
 
 **Deuda que traslada a la skill (LOCAL-5, aún no escrita):** al sacar el judge de la DB, el juicio de *cuándo/cómo* nace cada arista recae entero en la skill de captura. Por relación: `replaces` (reconocer corrección/reversión; recall por anclaje+topic+tag; estructural ≠ semántico, VIS-10); `extends` (amplía sin invalidar; recall por topic); `caused` (causa **documentada** → arista, si no → al texto, CAP-2); `diverges` (norma org + desvío; recall org-level; **sin backstop**). Principio: **relación faltante > memoria faltante** (CAP-13); red de seguridad = dev en el visor (CAP-14/VIS-7).
+
+---
+
+### `memories_fts` — búsqueda full-text (cerrada 2026-06-23, LOCAL/SQLite, **Opción A**)
+
+FTS5 **external-content**: el índice **NO guarda copia del texto**; lo lee de `memories` vía `content_rowid`.
+**Índice LOCAL-only y DERIVADO** — nunca sincroniza (un índice no es dato: se reconstruye, no se replica).
+
+**Impone en `memories`** (decisión de identidad, Opción A): rowid entero estable + uuid portable, separados.
+```sql
+-- memories (fragmento que la FTS EXIGE; el resto de la tabla sigue 🟡 pendiente):
+--   local_id INTEGER PRIMARY KEY   -- rowid estable (inmune a VACUUM); es el content_rowid del FTS; LOCAL-only, NO sincroniza
+--   id       TEXT NOT NULL UNIQUE  -- uuid v7, identidad lógica/portable; de acá cuelgan memory_relations y memory_versions
+```
+> El **uuid** sigue siendo la identidad referenciada (las FK de relations/versions apuntan a `memories(id)`, ahora columna
+> UNIQUE). El **entero** no lo referencia nada lógico — solo el índice. **No** es el dual-id prohibido en `memory`.
+
+```sql
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+    title,
+    content,
+    content='memories',           -- external content: lee el texto de la fila real, no lo duplica
+    content_rowid='local_id'      -- puente al entero estable
+);
+
+-- Triggers: external-content NO se autoindexa; hay que alimentarlo a mano.
+CREATE TRIGGER memories_fts_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, title, content)
+  VALUES (new.local_id, new.title, new.content);
+END;
+
+CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN              -- solo purga física local (SYNC-13)
+  INSERT INTO memories_fts(memories_fts, rowid, title, content)           -- delete necesita los valores VIEJOS
+  VALUES ('delete', old.local_id, old.title, old.content);
+END;
+
+CREATE TRIGGER memories_fts_au AFTER UPDATE OF title, content ON memories BEGIN   -- LWW: la versión ganadora re-indexa
+  INSERT INTO memories_fts(memories_fts, rowid, title, content)
+  VALUES ('delete', old.local_id, old.title, old.content);
+  INSERT INTO memories_fts(rowid, title, content)
+  VALUES (new.local_id, new.title, new.content);
+END;
+```
+
+**Patrón de búsqueda (filtros por JOIN de vuelta, NO en el índice):**
+```sql
+SELECT m.id, m.title, bm25(memories_fts, 5.0, 1.0) AS rank   -- title pesa 5x sobre content (tunable)
+FROM memories_fts
+JOIN memories m ON m.local_id = memories_fts.rowid
+WHERE memories_fts MATCH :q
+  AND m.lifecycle_state <> 'deleted'    -- soft-delete filtrado acá: gratis, el índice ni se entera
+  AND m.project_id = :project           -- scope/anclaje/tag/topic: todos por JOIN, valor SIEMPRE fresco
+ORDER BY rank                           -- bm25 da negativo; más negativo = más relevante
+LIMIT :n;
+```
+
+**Decisiones y porqué:**
+- **Solo `title` + `content` en el índice.** Todo lo estructural (scope, anclaje org/project/repo, tag, topic, lifecycle)
+  se filtra por **JOIN de vuelta a `memories`** con el valor fresco. Beneficio central de Opción A: un cambio de metadata
+  (p.ej. `active→replaced`) **NO toca el FTS** — el trigger de update dispara solo con `OF title, content`.
+- **Soft-delete = gratis.** La memoria `deleted` (lógico, cloud) sigue en el índice; el visor la oculta con
+  `lifecycle_state <> 'deleted'` en el JOIN. Solo la **purga física local** (SYNC-13) dispara el delete trigger.
+- **LWW sin tablas extra para el índice.** Gane quien gane, el `UPDATE` final de `content`/`title` re-indexa.
+  `memory_versions` (append-only) **NO se indexa** — el índice solo refleja la versión vigente.
+- **Triggers external-content quisquillosos (costo de una vez).** El delete/update necesita los valores **viejos**
+  (`'delete', old.local_id, old.title, old.content`). Mal escritos → corrupción silenciosa del índice. Reconstrucción de
+  emergencia: `INSERT INTO memories_fts(memories_fts) VALUES('rebuild');`.
+- **BM25 con `title` ponderado** (arranque 5x; tunable). El piso de rank tipo engram (descartar matches > -2.0) es
+  **filtro de query**, no de schema.
+
+**Cloud (Postgres): N/A.** El índice es **local-only y derivado**. Postgres no tiene FTS5; si el cloud necesitara
+búsqueda usaría `tsvector`+GIN construido de SUS datos — pero **VIS-1** manda al visor a leer del local, así que el cloud
+probablemente no indexa texto. **Nada que sincronizar.**
 
 ---
 
