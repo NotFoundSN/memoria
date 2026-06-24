@@ -1,6 +1,6 @@
 # Esquemas / Modelo físico — estado y reanudación
 
-> **Última actualización:** 2026-06-23. **Doc vivo.** Punto de reanudación para definir el **DDL** del proyecto
+> **Última actualización:** 2026-06-24. **Doc vivo.** Punto de reanudación para definir el **DDL** del proyecto
 > (las tablas SQL reales), usando los modelos de **engram** como contrapunto.
 > Fuente conceptual: `prd-memoria-de-equipo.md` (modelo de datos, secciones 2-3, DM-*, ID-*, ADM-*).
 
@@ -24,7 +24,7 @@
 | `project` + `repo` | ✅ **cerrada** (DDL abajo) | **no existe** | id local + clave estable (mecanismo 1): `repo.origin` (RES-7), `project.sync_id` cloud-assigned; engram **adivina por carpeta** (RES-4, criticado) |
 | `repo_topology` | ✅ **cerrada** (DDL abajo) | **no existe** | aristas dirigidas **repo→repo** (DM-5); ancla en **org** (cross-proyecto OK, cross-org no); relación proyecto↔proyecto **derivada** (query, no tabla) |
 | mapping `origin→proyecto` (autoritativo cloud) | 🟡 parcial (local: `repo.origin`+`project_id`) | **no existe** | mapping org-level que baja por sync (RES-8/ADM-11) — se cierra con sync |
-| `tag_vocabulary` (normalización local) | ❌ falta | **no existe** | engram no tiene tags; whitelist derivada de la skill (CON-8/CON-10) |
+| `tag_vocabulary` (normalización local) | ✅ **cerrada** (DDL abajo) | **no existe** | whitelist **universal** (mismo vocab para todas las orgs); 1 columna `tag TEXT PK COLLATE NOCASE`; vive en 2 artefactos (skill + tabla, CON-10); LOCAL-only, sin `org_id`, sin FK; validación en código → default `no_clasificado` (CON-11) |
 | sync: `sync_state` + outbox + cursors + audit | ❌ falta | `sync_state`, `sync_mutations`, `cloud_mutations`, `cloud_sync_audit_log` | engram lo tiene **muy maduro** — **adoptar el patrón** (3 cursores: enqueued/acked/pulled + outbox FIFO) |
 | `memories_fts` (FTS5) | ✅ **cerrada** (DDL abajo, **Opción A**) | `observations_fts` | external-content + `content_rowid` entero estable; **impone `local_id INTEGER PK` en `memories`**; índice **LOCAL-only/derivado** (nunca sincroniza); filtros por JOIN, no en el índice |
 
@@ -37,7 +37,7 @@
    incorporado** (LWW + `memory_versions` + barrido PRD). 🔒 **Opción A (FTS) ya fijó la identidad:**
    `local_id INTEGER PRIMARY KEY` (rowid local) + `id TEXT NOT NULL UNIQUE` (uuid v7).
 3. ~~**`memory_relations`** — aristas dirigidas (DM-10) + validez por DB (VAL-1).~~ ✅ **cerrada** (ver DDL abajo).
-4. **`tag_vocabulary`** — normalización local derivada de la skill (CON-10).
+4. ~~**`tag_vocabulary`** — normalización local derivada de la skill (CON-10).~~ ✅ **cerrada** (DDL abajo).
 5. **Sync** — `sync_state` + outbox + cursors + audit (reusar patrón de engram).
 6. ~~**`memories_fts`** — virtual table FTS5 + triggers.~~ ✅ **cerrada** (Opción A, DDL abajo). Impuso
    `local_id INTEGER PK` en `memories` (paso 2).
@@ -226,6 +226,65 @@ CREATE INDEX idx_memrel_target ON memory_relations(target_id);
 - **Caveat local/cloud:** el `CASCADE` protege solo el **LOCAL** (purga física, SYNC-13). En cloud el borrado es **lógico** (`lifecycle=deleted`, un `UPDATE`) → ocultar las aristas de una memoria `deleted` es **por query**, no por FK.
 
 **Deuda que traslada a la skill (LOCAL-5, aún no escrita):** al sacar el judge de la DB, el juicio de *cuándo/cómo* nace cada arista recae entero en la skill de captura. Por relación: `replaces` (reconocer corrección/reversión; recall por anclaje+topic+tag; estructural ≠ semántico, VIS-10); `extends` (amplía sin invalidar; recall por topic); `caused` (causa **documentada** → arista, si no → al texto, CAP-2); `diverges` (norma org + desvío; recall org-level; **sin backstop**). Principio: **relación faltante > memoria faltante** (CAP-13); red de seguridad = dev en el visor (CAP-14/VIS-7).
+
+---
+
+### `tag_vocabulary` — whitelist de tags (cerrada 2026-06-24, LOCAL/SQLite)
+
+Vocabulario controlado **universal**: el MISMO para todas las orgs (CON-8). Un único vocabulario canónico para todo el
+producto — si cada org definiera el suyo, cada org necesitaría su propia skill y se rompería la fuente de verdad única.
+**Vive en 2 artefactos** (CON-10, "skill + tabla, no 3"): la **skill de captura** (LOCAL-5) sabe *cuándo* usar cada tag;
+esta **tabla** valida que no se ingrese cualquier cosa. **LOCAL-only**, no sincroniza, **sin `org_id`**, **sin FK**
+(`memories.tag` es varchar libre, CON-9).
+
+```sql
+CREATE TABLE tag_vocabulary (
+    tag TEXT PRIMARY KEY COLLATE NOCASE   -- vocabulario controlado (CON-8); valores canónicos en MAYÚSCULA
+);
+
+-- Seed inicial = vocabulario v1 (CON-8), valores canónicos en MAYÚSCULA. NO es algo que se llene en runtime:
+-- son valores iniciales que vienen con la skill. `NO_CLASIFICADO` NO va acá (sentinel del sistema, CON-11).
+INSERT INTO tag_vocabulary (tag) VALUES
+    ('SPEC'),           -- Especificación de requerimientos de una funcionalidad
+    ('DESIGN'),         -- Diseño técnico y decisiones de arquitectura
+    ('VERIFICATION'),   -- Verificación, pruebas y validación del trabajo realizado
+    ('DECISION'),       -- Decisión puntual sobre tecnología, enfoque o diseño
+    ('DISCOVERY'),      -- Algo aprendido o descubierto en el código base, no obvio
+    ('BUGFIX'),         -- Bug encontrado y resuelto, con causa raíz documentada
+    ('PATTERN'),        -- Patrón o convención establecida en el proyecto
+    ('RETROSPECTIVE'),  -- Aprendizaje post-entrega o lección aprendida
+    ('INCIDENT'),       -- Falla en producción con análisis, causa raíz y resolución
+    ('CONFIG'),         -- Setup de entorno, variables y dependencias necesarias
+    ('PREFERENCE');     -- Inclinación o preferencia del equipo, sin ser una decisión cerrada
+```
+
+**Flujo de actualización (manual, sin migración, CON-9):** se mete una actualización → se tocan LOS DOS artefactos
+juntos: (1) se agregan los tags nuevos a esta tabla (re-seed); (2) se actualiza la skill para que sepa usarlos. **Sin
+versión trackeada en DB:** un "local con la tabla vieja" (CON-11) es un local con el seed/skill desactualizado.
+
+**Validación al escribir (MCP o API):** el escritor consulta esta tabla con el tag que mandó el modelo —
+- **existe** → se guarda;
+- **no existe** (typo / local desactualizado) → se guarda con el default **`no_clasificado`** (CON-11);
+- el guardado **NUNCA falla por el tag** — es metadata best-effort.
+
+`no_clasificado` **NO está en esta tabla**: es un sentinel diagnóstico (como el `-1` del autor, ID-12), no un tag real.
+Si abundan en `memories`, hay locales con el seed viejo (señal de CON-11).
+
+**Decisiones y porqué:**
+- **`TEXT`, NO enum de DB (CON-9).** Agregar/quitar un tag = re-seed + actualizar skill, **sin migración**. Una memoria
+  vieja con un tag retirado **no se rompe** (es solo un string). Puerta abierta a vocabulario dinámico a futuro sin tocar
+  el schema.
+- **Sin FK desde `memories.tag`.** Si fuera FK, retirar un tag rompería/bloquearía memorias viejas — justo lo que CON-9
+  prohíbe. La tabla valida en **código**, no por constraint de DB.
+- **Canónico en MAYÚSCULA + `COLLATE NOCASE`.** El valor almacenado/canónico es UPPER (`DESIGN`, no `design`). El
+  código normaliza el input a mayúscula y guarda el canónico de la tabla (no el string crudo del modelo) → el facetado
+  por tag (SRCH-4) no se fragmenta por casing. NOCASE es la red de seguridad en el schema por si el código no normaliza.
+- **Universal, sin `org_id`.** Decisión de **producto**: un vocabulario único para todas las orgs (una sola skill
+  canónica). No es configurable por tenant.
+- **Sin equivalente en engram.** Engram solo tiene `topic_key`, no maneja tags — invención del proyecto.
+
+**Cloud (Postgres): N/A.** El vocabulario es universal y vive en la skill + la tabla local; la validación ocurre en el
+escritor local/MCP, no en el cloud. Nada que sincronizar.
 
 ---
 
