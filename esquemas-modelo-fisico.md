@@ -16,7 +16,7 @@
 
 | Tabla del proyecto | Estado | Equivalente en engram | Diferencia clave |
 |---|---|---|---|
-| `memories` | 🟡 concepto | `observations` | **single UUID v7** (id `TEXT` en SQLite) vs **dual id** de engram (INTEGER PK + `sync_id` TEXT); suma `org/proyecto/repo` (engram: `project` string plano); `tag` controlado + `topic` (engram: solo `topic_key`, **sin tags**); `lifecycle_state` explícito. ✅ **#1554 incorporado:** lifecycle SIN `conflict` (LWW automático), historial en `memory_versions` |
+| `memories` | ✅ **cerrada** (DDL abajo) | `observations` | `local_id INTEGER PK` + `id TEXT UNIQUE` (uuid v7 global, **NO** el dual local/cloud de engram); anclaje `org/project/repo` por **FK compuestas** (tenant CFG-4 + coherencia repo∈proyecto); `tag`+`topic` (engram: solo `topic_key`, **sin tags**); `lifecycle` sin `deleted` en local (purga física, DM-13); **#1554** LWW + `memory_versions` |
 | `memory_versions` (#1554) | ✅ **cerrada** (DDL abajo) | **no existe** | append-only keyed por `(memory_id, version)`; guarda **cada edición** (audit completo, no solo el perdedor de LWW) — reemplaza la UI de `conflict`, ahora eliminado |
 | `users` + `api_keys` + `project_admin_grants` | ✅ aprobada (org/credenciales) | `cloud_users` | **3 credenciales separadas** (key de sync / password del visor ID-11 / login cloud ADM-6); engram tiene solo `cloud_users` y la key es config, no vive en DB |
 | `memory_relations` | ✅ **cerrada** (DDL abajo) | `memory_relations` | vocab `replaces/extends/caused/diverges` + **validez resuelta por la DB** (VAL-1); engram usa `related/compatible/supersedes/...` + `judgment_status` + `confidence`, multi-actor **sin UNIQUE** en `(source,target)` |
@@ -33,9 +33,9 @@
 1. **Estructura de anclaje** — ✅ `org → project → repo` + `repo_topology` **cerradas** (DDL abajo). Falta el
    mapping `origin→proyecto` autoritativo (cloud, baja por sync) — se cierra con sync. Es la base de la que
    cuelgan las FK de `memories`, y es donde engram **no tiene nada** (máximo diferencial).
-2. **`memories`** — escribir el DDL real con las FK de anclaje (concepto aprobado, DM-15). ✅ **#1554
-   incorporado** (LWW + `memory_versions` + barrido PRD). 🔒 **Opción A (FTS) ya fijó la identidad:**
-   `local_id INTEGER PRIMARY KEY` (rowid local) + `id TEXT NOT NULL UNIQUE` (uuid v7).
+2. ~~**`memories`** — escribir el DDL real con las FK de anclaje (concepto aprobado, DM-15).~~ ✅ **cerrada** (DDL
+   abajo): identidad Opción A (`local_id INTEGER PK` + `id TEXT UNIQUE`), anclaje por **FK compuestas** (tenant +
+   coherencia repo∈proyecto), #1554 (LWW + `memory_versions`).
 3. ~~**`memory_relations`** — aristas dirigidas (DM-10) + validez por DB (VAL-1).~~ ✅ **cerrada** (ver DDL abajo).
 4. ~~**`tag_vocabulary`** — normalización local derivada de la skill (CON-10).~~ ✅ **cerrada** (DDL abajo).
 5. **Sync** — `sync_state` + outbox + cursors + audit (reusar patrón de engram).
@@ -62,9 +62,10 @@
   Barrido pendiente en el PRD: DM-12/13/14, SYNC-6/9/12, VIS-9, SRCH-6.
 - **Anclaje (org/project/repo) — cerrado, mecanismo 1:** `memory` guarda **FK enteros LOCALES**; el sync traduce a
   **clave estable** (`repo.origin` RES-7 / `project.sync_id` cloud / org implícita). Los ids locales nunca viajan.
-  El **doble-id** (local int + sync_id) es OK en project/repo —nada cuelga de su id— pero **NO** en `memory`
-  (las `memory_relations` cuelgan del uuid) → single UUID. `org` es **LOCAL-only** y **sin token** (secreto en el
-  keychain del OS, CFG-6). Detalle en engram, topic `prd/data-model/anchor-tables`.
+  El **doble-id local↔cloud** de engram (`sync_id`) **NO** se replica en `memory`: las `memory_relations` cuelgan del
+  **uuid** (`id`), no de un id de sync. Matiz (Opción A, 2026-06-23): `memory` sí suma `local_id INTEGER` además del uuid,
+  pero es **rowid local del FTS que no sincroniza** (nada lógico cuelga de él), no el dual de engram. `org` es
+  **LOCAL-only** y **sin token** (secreto en el keychain del OS, CFG-6). Detalle en engram, topic `prd/data-model/anchor-tables`.
 - **Pendientes abiertos (del commit de hoy):** reconciliación proyecto-local provisional ↔ mapping org (cerca de RES-8);
   fallback local opcional de credencial cifrada at-rest (no hasheada) para entornos sin keychain (CFG-6/LOCAL-8). `prd:934-950`
 - **Reabrir PRD por `repo_topology` (decidido 2026-06-23):** DM-5/DM-6 pasan de "aristas entre repos **de un proyecto**"
@@ -90,7 +91,8 @@ CREATE TABLE project (
   id      INTEGER PRIMARY KEY,
   org_id  INTEGER NOT NULL REFERENCES org(id),
   name    TEXT NOT NULL,
-  sync_id TEXT                          -- id estable del cloud; NULL = provisional/LOCAL (lo crea el admin, ADM-11)
+  sync_id TEXT,                         -- id estable del cloud; NULL = provisional/LOCAL (lo crea el admin, ADM-11)
+  UNIQUE (org_id, id)                   -- target de la FK compuesta (org_id, project_id) de memories (redundante con la PK, SQLite lo exige)
 );
 
 CREATE TABLE repo (
@@ -100,7 +102,8 @@ CREATE TABLE repo (
   origin     TEXT    NOT NULL,                           -- git origin = identidad estable (RES-7)
   name       TEXT,                                       -- alias amigable para humanos; puede diferir del nombre en GitHub (no derivado del origin)
   UNIQUE (org_id, origin),                               -- un origin = un repo por org (RES-7/ADM-11)
-  UNIQUE (org_id, id)                                    -- target de las FK compuestas de repo_topology (redundante con la PK, pero SQLite lo exige)
+  UNIQUE (org_id, id),                                   -- target de las FK compuestas de repo_topology (redundante con la PK, pero SQLite lo exige)
+  UNIQUE (project_id, id)                                -- target de la FK compuesta (project_id, repo_id) de memories (coherencia repo∈proyecto)
 );
 ```
 
@@ -150,6 +153,75 @@ WHERE rs.project_id <> rt.project_id;   -- las aristas que cruzan proyecto = map
 - **Engram no tiene NADA.** Sin repos, sin topología (`project` = string plano). Greenfield puro, **máximo diferencial** — igual que `org/project/repo`.
 
 **Cloud (Postgres): BLOQUEADO** — depende del modelo de anclaje cloud (`org/project/repo` en Postgres, **aún no escrito**). Forma futura: keyear por `origin` (RES-7, clave estable) + `upload_at` (cursor de pull, SYNC-7) + `author_id` (admin que la declaró, ADM-11).
+
+---
+
+### `memories` — entidad raíz (cerrada 2026-06-24, LOCAL/SQLite)
+
+Tabla raíz del modelo (DM-15). Identidad **Opción A**: `local_id INTEGER PK` (rowid del FTS, local-only) + `id TEXT
+UNIQUE` (uuid v7, identidad lógica de la que cuelgan `memory_relations` y `memory_versions`). Anclaje por **FK enteras
+locales** (mecanismo 1: el sync traduce a clave estable, los ids locales no viajan), con **FK compuestas** que hacen
+irrepresentable cruzar tenant (CFG-4) o anclar un repo fuera de su proyecto.
+
+```sql
+CREATE TABLE memories (
+    local_id        INTEGER PRIMARY KEY,                    -- rowid estable = content_rowid del FTS; LOCAL-only, NO sincroniza
+    id              TEXT    NOT NULL UNIQUE,                -- uuid v7; identidad lógica/portable (DM-15); cuelgan relations/versions
+
+    title           TEXT    NOT NULL,
+    content         TEXT    NOT NULL,
+    topic           TEXT,                                   -- string libre, opcional, sin entidad propia (DM-7/DM-8)
+    tag             TEXT,                                   -- vocab controlado validado en CÓDIGO (CON-9/10); NULL = sin tag
+
+    org_id          INTEGER NOT NULL,                       -- DM-1: org SIEMPRE (tenant boundary, CFG-4)
+    project_id      INTEGER,                                -- DM-1: opcional
+    repo_id         INTEGER,                                -- DM-1: opcional (si existe ⇒ project_id NOT NULL, DM-2)
+
+    author_id       INTEGER NOT NULL DEFAULT -1,            -- autor original; sentinel -1 local, cloud remapea (ID-12)
+    editor_id       INTEGER,                                -- último editor; NULL = nunca editado; ≠ author_id = curación admin (ID-10)
+
+    lifecycle_state TEXT    NOT NULL                        -- sin DEFAULT: el código lo setea SIEMPRE explícito
+                    CHECK (lifecycle_state IN ('draft','active','replaced','inactive')),  -- 'deleted' NO: en local es purga física (DM-13)
+
+    created_at      INTEGER NOT NULL,                       -- epoch millis UTC (creación local)
+    edited_at       INTEGER,                                -- NULL si nunca se editó (DM-15)
+    -- upload_at: NO vive en el local (cloud-only, cursor de pull SYNC-7)
+
+    -- Integridad de anclaje
+    FOREIGN KEY (org_id)              REFERENCES org(id),                 -- org siempre (cubre la memoria org-only)
+    FOREIGN KEY (org_id, project_id)  REFERENCES project(org_id, id),    -- proyecto en la org correcta (tenant)
+    FOREIGN KEY (project_id, repo_id) REFERENCES repo(project_id, id),   -- repo en el PROYECTO correcto (⇒ org, transitivo)
+
+    CHECK (repo_id IS NULL OR project_id IS NOT NULL)       -- DM-2: si hay repo, hay proyecto
+);
+
+CREATE INDEX idx_mem_scope     ON memories(org_id, project_id, repo_id);  -- filtros de anclaje/scope
+CREATE INDEX idx_mem_topic     ON memories(topic);                        -- recall por topic (DM-9 / SRCH)
+CREATE INDEX idx_mem_tag       ON memories(tag);                          -- facetado por tag (SRCH-4)
+CREATE INDEX idx_mem_lifecycle ON memories(lifecycle_state);              -- active/draft por defecto (DM-14)
+```
+
+**Requiere en las tablas de anclaje (para las FK compuestas):** `project` suma `UNIQUE (org_id, id)`; `repo` suma
+`UNIQUE (project_id, id)` (además del `UNIQUE (org_id, id)` que ya tenía para `repo_topology`).
+
+**Decisiones y porqué:**
+- **Identidad Opción A.** `local_id` entero (rowid estable del FTS, local-only, NO sincroniza) + `id` uuid v7 (identidad
+  lógica). NO es el dual local/cloud de engram: nada lógico cuelga del entero. Ver sección `memories_fts`.
+- **Anclaje por FK compuestas, no simples.** El tenant boundary (CFG-4) es límite duro:
+  `(org_id, project_id)→project(org_id, id)` hace **irrepresentable cruzar org**. `(project_id, repo_id)→repo(project_id,
+  id)` cierra además la **coherencia repo∈proyecto** (un repo no puede anclarse a un proyecto que no es el suyo). La FK
+  simple `org_id→org` cubre la memoria **org-only** (cuando `project_id` es NULL las compuestas no se evalúan).
+- **`lifecycle_state` sin DEFAULT, CHECK sin `deleted`.** El estado nunca es implícito. `deleted` es **cloud-only**
+  (borrado lógico para auditoría, DM-16); en local dispara **purga física** (DM-13), por eso no es valor almacenable acá.
+  El filtro `<> 'deleted'` del query FTS es defensa/no-op en local.
+- **`tag` sin FK ni CHECK.** Se valida en código contra `tag_vocabulary` (CON-9): un tag retirado no rompe memorias
+  viejas. `topic` sin entidad ni unicidad (DM-8): string libre que se reutiliza por búsqueda (DM-9).
+- **`author_id` sentinel -1 / `editor_id` nullable.** Mismo patrón que `memory_relations` y `memory_versions` (ID-12).
+- **`upload_at` fuera del local.** Cursor de pull asignado por el cloud al recibir (SYNC-7) — no vive en SQLite.
+
+**Cloud (Postgres): BLOQUEADO** — depende del modelo de anclaje cloud (org/project/repo en Postgres, aún no escrito).
+Forma futura: anclaje por clave estable (`repo.origin` RES-7, `project.sync_id`), `author_id`/`editor_id` remapeados al
+id_dev real (ID-12), suma `upload_at TIMESTAMPTZ` y el estado `deleted` (borrado lógico para auditoría, DM-16).
 
 ---
 
